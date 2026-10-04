@@ -122,8 +122,8 @@ func run() error {
 	// teamusers 鉴权：配置了 NOTIFY_TEAMUSERS_URL 就由 teamusers 接管 /api/* 鉴权，静态 Token 退场。
 	teamusersURL := strings.TrimSpace(envStr("NOTIFY_TEAMUSERS_URL", ""))
 	teamusersAudience := envStr("NOTIFY_TEAMUSERS_AUDIENCE", "teamusers")
-	teamusersPermSend := envStr("NOTIFY_TEAMUSERS_PERMISSION_SEND", "msghub:send:any")
-	teamusersPermRead := envStr("NOTIFY_TEAMUSERS_PERMISSION_READ", "msghub:read:any")
+	teamusersPermSend := envStr("NOTIFY_TEAMUSERS_PERMISSION_SEND", httpapi.DefaultPermissionSend)
+	teamusersPermRead := envStr("NOTIFY_TEAMUSERS_PERMISSION_READ", httpapi.DefaultPermissionRead)
 	var teamusersAuth *httpapi.TeamusersAuth
 	if teamusersURL != "" {
 		serviceToken := strings.TrimSpace(envStr("NOTIFY_TEAMUSERS_SERVICE_TOKEN", ""))

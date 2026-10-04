@@ -9,6 +9,26 @@ import (
 	iam "github.com/crazy4chicken/nsc-teamusers/sdk/go"
 )
 
+const (
+	// DefaultPermissionSend 发送类接口（POST /api/v1/notify、POST /api/v1/channels/email/verify）的默认权限。
+	DefaultPermissionSend = "msghub:send:any"
+	// DefaultPermissionRead 查询类接口（GET 通道与通知记录）的默认权限。
+	DefaultPermissionRead = "msghub:read:any"
+)
+
+// PermissionClass 把已知路由归类为发送或查询权限。两个返回值都为 false
+// 表示该路由只需要认证（未命中的 /api/ 路径照旧 404）。
+func PermissionClass(method, path string) (send, read bool) {
+	switch {
+	case method == http.MethodPost && (path == "/api/v1/notify" || path == "/api/v1/channels/email/verify"):
+		return true, false
+	case method == http.MethodGet && (path == "/api/v1/channels" || path == "/api/v1/notifications" || strings.HasPrefix(path, "/api/v1/notifications/")):
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // TeamusersOptions 是构造 TeamusersAuth 所需的配置，由 main 从环境变量读取。
 type TeamusersOptions struct {
 	BaseURL        string        // teamusers 服务基址，例如 http://127.0.0.1:8080
@@ -59,10 +79,11 @@ func (a *TeamusersAuth) Allow(ctx context.Context, claims iam.Claims, permission
 
 // RequiredPermission 返回已知路由要求的权限；空串表示只需认证（未命中的 /api/ 路径照旧 404）。
 func (a *TeamusersAuth) RequiredPermission(method, path string) string {
+	send, read := PermissionClass(method, path)
 	switch {
-	case method == http.MethodPost && (path == "/api/v1/notify" || path == "/api/v1/channels/email/verify"):
+	case send:
 		return a.permissionSend
-	case method == http.MethodGet && (path == "/api/v1/channels" || path == "/api/v1/notifications" || strings.HasPrefix(path, "/api/v1/notifications/")):
+	case read:
 		return a.permissionRead
 	default:
 		return ""

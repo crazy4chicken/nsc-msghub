@@ -69,12 +69,9 @@ func NewServer(opt Options) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /api/v1/channels", s.handleChannels)
-	mux.HandleFunc("POST /api/v1/notify", s.handleNotify)
-	mux.HandleFunc("GET /api/v1/notifications", s.handleListNotifications)
-	mux.HandleFunc("GET /api/v1/notifications/{id}", s.handleGetNotification)
-	mux.HandleFunc("POST /api/v1/channels/email/verify", s.handleVerifyEmail)
+	s.RegisterRoutes(func(method, pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(method+" "+pattern, handler)
+	})
 	// 未命中的 /api/ 路径返回 JSON 404，避免落到控制台页面。
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, notify.NotFoundf("接口 %s %s 不存在", r.Method, r.URL.Path))
