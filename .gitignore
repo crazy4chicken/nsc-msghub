@@ -15,3 +15,10 @@ notify-service.exe
 
 # 编辑器/构建残留
 *~
+
+# 文档站构建产物与生成的 OpenAPI 规范
+/genspec
+docs/public/openapi.yaml
+node_modules/
+docs/.vitepress/dist
+docs/.vitepress/cache

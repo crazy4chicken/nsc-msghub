@@ -60,7 +60,9 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/notify \
 ## 部署
 
 生产环境用 systemd 直接运行或交给 svchost 托管；发布产物契约、compose 示例、鉴权与升级/回滚步骤见
-[docs/deploy.md](docs/deploy.md)。
+[docs/guide/deploy.md](docs/guide/deploy.md)。
+
+在线文档（英文）：<https://crazy4chicken.github.io/nsc-msghub/>
 
 ## 配置
 

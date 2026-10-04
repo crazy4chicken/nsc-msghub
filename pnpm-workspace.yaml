@@ -1,0 +1,9 @@
+# pnpm 12 blocks dependency build scripts by default; allow esbuild's
+# postinstall so `pnpm install` does not fail with ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  esbuild: true
+
+# The internal teamusers-apidocs-vitepress package is released frequently;
+# keep it exempt from the minimum release age policy.
+minimumReleaseAgeExclude:
+  - teamusers-apidocs-vitepress@0.1.0

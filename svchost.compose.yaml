@@ -1,0 +1,36 @@
+# svchost compose for nsc-msghub.
+# Field semantics: https://github.com/crazy4chicken/nekostick-svchost/blob/main/docs/compose.md
+#
+# strictSources is intentionally omitted (it defaults to false): a single
+# source.sha256 cannot cover every architecture at once, because the per-arch
+# ZIP assets have different digests. Pin sha256 only for a
+# single-architecture deployment, or set strictSources: true together with a
+# matching digest.
+serviceScope: global
+
+services:
+  msghub:
+    source:
+      release: "github:crazy4chicken/nsc-msghub@v0.3.0" # SemVer ref: release tag and asset version match by SemVer identity
+      # sha256: "0000000000000000000000000000000000000000000000000000000000000000" # 64 hex chars; optional single-arch pin, otherwise svchost uses the GitHub asset digest
+    env:
+      NOTIFY_ADDR: "0.0.0.0:8090" # use "${HOST}:${PORT}" when the Host should assign the port
+      NOTIFY_DATA_DIR: /var/lib/nsc-msghub # must be persistent and writable; never point it at artifacts/ or tmp/
+      NOTIFY_ROUTES: "alert=email,sms;digest=email;default=email"
+      NOTIFY_USERS_FILE: /var/lib/nsc-msghub/users.json
+      NOTIFY_SMTP_HOST: smtp.qq.com
+      NOTIFY_SMTP_PORT: "465"
+      NOTIFY_SMTP_TLS: implicit
+      NOTIFY_SMTP_USER: you@qq.com
+      NOTIFY_SMTP_PASS: "${HOST:MSGHUB_SMTP_PASS}" # SMTP auth code comes from the Host environment, not this file
+      NOTIFY_TEAMUSERS_URL: "http://127.0.0.1:8080"
+      NOTIFY_TEAMUSERS_AUDIENCE: teamusers
+      NOTIFY_TEAMUSERS_SERVICE_TOKEN: "${HOST:MSGHUB_TEAMUSERS_SERVICE_TOKEN}" # service refuses to start when missing
+      NOTIFY_TEAMUSERS_PERMISSION_SEND: "msghub:send:any"
+      NOTIFY_TEAMUSERS_PERMISSION_READ: "msghub:read:any"
+    start: eager
+    restart: on-failure
+    health:
+      type: http
+      path: /healthz
+      timeout: 5s
