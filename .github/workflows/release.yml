@@ -93,14 +93,20 @@ jobs:
       # On manual dispatch the tag may not exist yet: gh release create
       # creates it at the dispatched ref. GH_REPO substitutes for the
       # missing git checkout in this job. --notes is prepended to the
-      # generated notes and points at the deployment guide (systemd /
-      # svchost compose example) required by the svchost publishing docs.
+      # generated notes and links the hosted deployment guide, the
+      # committed sample Compose file, and the per-arch asset downloads,
+      # as required by the svchost publishing docs.
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          NOTES=$(printf '%s\n' \
+            "部署与配置指南（svchost compose）: https://crazy4chicken.github.io/nsc-msghub/guide/deploy" \
+            "示例 Compose 文件: https://github.com/crazy4chicken/nsc-msghub/blob/main/svchost.compose.yaml" \
+            "下载 x64: https://github.com/crazy4chicken/nsc-msghub/releases/download/$TAG/msghub_${TAG#v}_x64.zip" \
+            "下载 arm64: https://github.com/crazy4chicken/nsc-msghub/releases/download/$TAG/msghub_${TAG#v}_arm64.zip")
           gh release create "$TAG" --title "$TAG" --generate-notes \
-            --notes "部署与配置（systemd / svchost）: https://github.com/crazy4chicken/nsc-msghub/blob/main/docs/deploy.md" \
+            --notes "$NOTES" \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" dist/*.zip --clobber
