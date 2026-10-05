@@ -135,19 +135,34 @@ func run() error {
 	teamusersPermSend := envStr("NOTIFY_TEAMUSERS_PERMISSION_SEND", httpapi.DefaultPermissionSend)
 	teamusersPermRead := envStr("NOTIFY_TEAMUSERS_PERMISSION_READ", httpapi.DefaultPermissionRead)
 	var teamusersAuth *httpapi.TeamusersAuth
+	teamusersCredMode := ""
 	if teamusersURL != "" {
 		serviceToken := strings.TrimSpace(envStr("NOTIFY_TEAMUSERS_SERVICE_TOKEN", ""))
-		if serviceToken == "" {
-			return fmt.Errorf("NOTIFY_TEAMUSERS_URL 已设置，但缺少 NOTIFY_TEAMUSERS_SERVICE_TOKEN")
+		clientID := strings.TrimSpace(envStr("NOTIFY_TEAMUSERS_CLIENT_ID", ""))
+		clientSecret := strings.TrimSpace(envStr("NOTIFY_TEAMUSERS_CLIENT_SECRET", ""))
+		switch {
+		case (clientID == "") != (clientSecret == ""):
+			return fmt.Errorf("NOTIFY_TEAMUSERS_CLIENT_ID 与 NOTIFY_TEAMUSERS_CLIENT_SECRET 必须同时配置")
+		case clientID == "" && serviceToken == "":
+			return fmt.Errorf("NOTIFY_TEAMUSERS_URL 已设置，但缺少服务凭证：请配置 NOTIFY_TEAMUSERS_CLIENT_ID/NOTIFY_TEAMUSERS_CLIENT_SECRET（自动换取令牌），或 NOTIFY_TEAMUSERS_SERVICE_TOKEN（静态令牌）")
 		}
 		teamusersAuth = httpapi.NewTeamusersAuth(httpapi.TeamusersOptions{
 			BaseURL:        teamusersURL,
 			Audience:       teamusersAudience,
 			ServiceToken:   serviceToken,
+			ClientID:       clientID,
+			ClientSecret:   clientSecret,
 			Timeout:        time.Duration(envInt("NOTIFY_TEAMUSERS_TIMEOUT", 5)) * time.Second,
 			PermissionSend: teamusersPermSend,
 			PermissionRead: teamusersPermRead,
 		})
+		teamusersCredMode = "static-token"
+		if clientID != "" {
+			teamusersCredMode = "client-credentials"
+		}
+		if err := teamusersAuth.Prime(); err != nil {
+			return fmt.Errorf("换取 teamusers 服务令牌失败: %w", err)
+		}
 		defer teamusersAuth.Close()
 	}
 
@@ -201,6 +216,7 @@ func run() error {
 		}
 		logger.Info("已开启 teamusers 鉴权",
 			"url", teamusersURL,
+			"credential", teamusersCredMode,
 			"audience", teamusersAudience,
 			"sendPermission", teamusersPermSend,
 			"readPermission", teamusersPermRead)

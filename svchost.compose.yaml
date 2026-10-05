@@ -24,7 +24,8 @@ services:
       NOTIFY_SMTP_PASS: "${HOST:MSGHUB_SMTP_PASS}" # SMTP auth code comes from the Host environment, not this file
       NOTIFY_TEAMUSERS_URL: "http://127.0.0.1:8080"
       NOTIFY_TEAMUSERS_AUDIENCE: teamusers
-      NOTIFY_TEAMUSERS_SERVICE_TOKEN: "${HOST:MSGHUB_TEAMUSERS_SERVICE_TOKEN}" # service refuses to start when missing
+      NOTIFY_TEAMUSERS_CLIENT_ID: "${HOST:MSGHUB_TEAMUSERS_CLIENT_ID}" # service account client_id (username); exchanged for a token on startup
+      NOTIFY_TEAMUSERS_CLIENT_SECRET: "${HOST:MSGHUB_TEAMUSERS_CLIENT_SECRET}" # one-time secret from POST /users/{id}/credentials; refreshed automatically
       NOTIFY_TEAMUSERS_PERMISSION_SEND: "msghub:send:any"
       NOTIFY_TEAMUSERS_PERMISSION_READ: "msghub:read:any"
     start: eager

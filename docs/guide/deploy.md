@@ -53,8 +53,8 @@ install -m 0755 msghub /usr/local/bin/msghub
 ```
 
 Write `/etc/nsc-msghub.env` (mode 0600; it contains the SMTP auth code, the
-teamusers service token and the database DSN — quote values that contain spaces
-or `#`):
+teamusers service credentials and the database DSN — quote values that contain
+spaces or `#`):
 
 ```sh
 NOTIFY_ADDR=0.0.0.0:8090
@@ -73,7 +73,9 @@ NOTIFY_SMTP_PASS=auth-code
 
 # teamusers auth (optional; once set, the static NOTIFY_TOKEN retires)
 # NOTIFY_TEAMUSERS_URL=http://127.0.0.1:8080
-# NOTIFY_TEAMUSERS_SERVICE_TOKEN=
+# NOTIFY_TEAMUSERS_CLIENT_ID=msghub                  # service account client_id (username)
+# NOTIFY_TEAMUSERS_CLIENT_SECRET=                    # one-time secret; exchanged for a token (recommended)
+# NOTIFY_TEAMUSERS_SERVICE_TOKEN=                    # alternative: static kind=service access token
 ```
 
 `NOTIFY_ADDR=0.0.0.0:8090` is what opens the port to other hosts; the default
@@ -145,7 +147,8 @@ services:
       NOTIFY_SMTP_PASS: "${HOST:MSGHUB_SMTP_PASS}" # SMTP auth code comes from the Host environment, not this file
       NOTIFY_TEAMUSERS_URL: "http://127.0.0.1:8080"
       NOTIFY_TEAMUSERS_AUDIENCE: teamusers
-      NOTIFY_TEAMUSERS_SERVICE_TOKEN: "${HOST:MSGHUB_TEAMUSERS_SERVICE_TOKEN}" # service refuses to start when missing
+      NOTIFY_TEAMUSERS_CLIENT_ID: "${HOST:MSGHUB_TEAMUSERS_CLIENT_ID}" # service account client_id (username)
+      NOTIFY_TEAMUSERS_CLIENT_SECRET: "${HOST:MSGHUB_TEAMUSERS_CLIENT_SECRET}" # one-time secret; exchanged for a token on startup
       NOTIFY_TEAMUSERS_PERMISSION_SEND: "msghub:send:any"
       NOTIFY_TEAMUSERS_PERMISSION_READ: "msghub:read:any"
     start: eager
@@ -192,9 +195,17 @@ A ready-to-use copy is checked in at the repository root:
   token returns 401 `unauthorized`, and insufficient permissions return 403
   `forbidden`. The static `NOTIFY_TOKEN` is ignored at the same time (the startup
   log warns).
-- `NOTIFY_TEAMUSERS_SERVICE_TOKEN` is the service token msghub uses to look up
-  user permissions; a configured URL without it makes the service refuse to
-  start.
+- Permission lookups need a teamusers service credential. Preferred:
+  `NOTIFY_TEAMUSERS_CLIENT_ID` + `NOTIFY_TEAMUSERS_CLIENT_SECRET` — create a
+  service account in teamusers and copy the `client_id` (username) and the
+  one-time `client_secret` returned by `POST /users/{id}/credentials`. msghub
+  trades them for a service access token at `POST /auth/client-credentials` on
+  startup (failing fast when the credentials or the network are wrong) and
+  refreshes it before expiry, so the env file holds long-lived credentials
+  instead of a ten-minute token. Alternative: `NOTIFY_TEAMUSERS_SERVICE_TOKEN`
+  holds a static `kind=service` access token — only practical when the teamusers
+  operator raises `TEAMUSERS_ACCESS_TOKEN_TTL`. A configured URL with neither
+  option makes the service refuse to start.
 - `NOTIFY_TEAMUSERS_AUDIENCE` (default `teamusers`) must match the `aud` the
   issuer writes into the JWT, otherwise every request gets a 401.
 - The default permission names are `msghub:send:any` (send, email self-check)

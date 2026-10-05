@@ -37,7 +37,9 @@ The template at the repository root lists every switch with inline comments:
 | --- | --- | --- |
 | `NOTIFY_TEAMUSERS_URL` | empty | teamusers service address; when set it takes over `/api/*` authentication (JWT + permission checks). |
 | `NOTIFY_TEAMUSERS_AUDIENCE` | `teamusers` | Expected JWT `aud`. |
-| `NOTIFY_TEAMUSERS_SERVICE_TOKEN` | required | Service Bearer token used to query user permissions; the service refuses to start without it once the URL is set. |
+| `NOTIFY_TEAMUSERS_CLIENT_ID` | empty | Service account `client_id` (the teamusers username); with the matching secret msghub exchanges and refreshes the service token automatically (recommended). |
+| `NOTIFY_TEAMUSERS_CLIENT_SECRET` | empty | One-time service account secret; must be set together with `..._CLIENT_ID`. |
+| `NOTIFY_TEAMUSERS_SERVICE_TOKEN` | empty | Static service token (`kind=service` access token); an alternative to the pair above, which wins when both are configured. |
 | `NOTIFY_TEAMUSERS_TIMEOUT` | `5` | JWKS and permission endpoint timeout (seconds). |
 | `NOTIFY_TEAMUSERS_PERMISSION_SEND` | `msghub:send:any` | Permission required by sending endpoints. |
 | `NOTIFY_TEAMUSERS_PERMISSION_READ` | `msghub:read:any` | Permission required by query endpoints. |
@@ -102,8 +104,20 @@ Permissions required in teamusers mode:
 
 `/healthz` and the test page stay public; unmatched `/api/` paths require
 authentication only and then still return 404. In teamusers mode `NOTIFY_TOKEN`
-is ignored (the startup log warns), and `NOTIFY_TEAMUSERS_SERVICE_TOKEN` is used
-to query user permissions — the service refuses to start without it.
+is ignored (the startup log warns). Permission lookups need a service
+credential, configured one of two ways (client credentials win when both are
+set):
+
+- `NOTIFY_TEAMUSERS_CLIENT_ID` + `NOTIFY_TEAMUSERS_CLIENT_SECRET` — the service
+  account credentials created in teamusers (`POST /users/{id}/credentials` with
+  `kind=service`; the secret is returned once). msghub exchanges them at
+  `POST /auth/client-credentials` on startup (failing fast on bad credentials)
+  and refreshes the access token before it expires. Recommended, because the
+  issued token lives ten minutes by default.
+- `NOTIFY_TEAMUSERS_SERVICE_TOKEN` — a static `kind=service` access token, for
+  deployments where the teamusers operator raises `TEAMUSERS_ACCESS_TOKEN_TTL`.
+
+With neither configured the service refuses to start.
 
 ## User directory
 

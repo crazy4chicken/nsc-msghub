@@ -83,7 +83,9 @@ SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY 
 | `NOTIFY_TOKEN` | 空 | 静态 Token；设置后 `/api/*` 需要 `Authorization: Bearer <token>`。仅在未配置 `NOTIFY_TEAMUSERS_URL` 时生效 |
 | `NOTIFY_TEAMUSERS_URL` | 空 | teamusers 服务地址；设置后由 teamusers 接管 `/api/*` 鉴权（JWT + 权限校验） |
 | `NOTIFY_TEAMUSERS_AUDIENCE` | `teamusers` | 期望的 JWT `aud` |
-| `NOTIFY_TEAMUSERS_SERVICE_TOKEN` | 必填 | 查询用户权限用的服务 Bearer Token；缺失时拒绝启动 |
+| `NOTIFY_TEAMUSERS_CLIENT_ID` | 空 | 服务账号 `client_id`（teamusers 用户名）；与下面一项成对配置后自动换取并刷新服务令牌（推荐） |
+| `NOTIFY_TEAMUSERS_CLIENT_SECRET` | 空 | 服务账号一次性密钥；与 `..._CLIENT_ID` 必须同时配置，只配一半会拒绝启动 |
+| `NOTIFY_TEAMUSERS_SERVICE_TOKEN` | 空 | 静态服务令牌（`kind=service` 的 access token）；与上面两项二选一，同时配置时以 client-credentials 为准 |
 | `NOTIFY_TEAMUSERS_TIMEOUT` | `5` | JWKS 与权限接口超时（秒） |
 | `NOTIFY_TEAMUSERS_PERMISSION_SEND` | `msghub:send:any` | 发送类接口要求的权限 |
 | `NOTIFY_TEAMUSERS_PERMISSION_READ` | `msghub:read:any` | 查询类接口要求的权限 |
@@ -118,8 +120,28 @@ teamusers 签发的 JWT（`Authorization: Bearer <JWT>`），缺失或校验失�
 | `NOTIFY_TEAMUSERS_PERMISSION_READ`（`msghub:read:any`） | `GET /api/v1/channels`、`GET /api/v1/notifications`、`GET /api/v1/notifications/{id}` |
 
 `/healthz` 与测试页面保持公开；未命中的 `/api/` 路径只要求认证，随后照旧 404。此时
-`NOTIFY_TOKEN` 被忽略（启动日志会给出警告），`NOTIFY_TEAMUSERS_SERVICE_TOKEN` 用于向 teamusers
-查询用户权限，缺失时服务拒绝启动。
+`NOTIFY_TOKEN` 被忽略（启动日志会给出警告）。向 teamusers 查询用户权限需要一个服务凭证，
+两种配置方式（同时配置时以 client-credentials 为准）：
+
+1. **client-credentials（推荐）**：`NOTIFY_TEAMUSERS_CLIENT_ID` + `NOTIFY_TEAMUSERS_CLIENT_SECRET`
+   填 teamusers 服务账号的 `client_id`（即账号用户名）与创建/轮换时返回的一次性 `client_secret`。
+   msghub 启动时调 `POST /auth/client-credentials` 换取服务 access token（启动预取，凭证错误直接启动失败），
+   并在到期前自动刷新。服务账号在 teamusers 侧创建：
+
+   ```sh
+   curl -X POST "$IAM_BASE_URL/users" -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
+     -H 'Content-Type: application/json' --data '{"username":"msghub","display_name":"msghub"}'
+   curl -X POST "$IAM_BASE_URL/users/$SERVICE_USER_ID/credentials" -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
+     -H 'Content-Type: application/json' --data '{"kind":"service"}'
+   ```
+
+   第二条返回的 `client_id` / `client_secret` 就是上面两个环境变量（secret 只返回一次）。
+
+2. **静态令牌**：`NOTIFY_TEAMUSERS_SERVICE_TOKEN` 填服务 access token（`kind=service` 的 JWT）。
+   该令牌默认只有 10 分钟有效期（teamusers 的 `TEAMUSERS_ACCESS_TOKEN_TTL`），长期部署请用
+   client-credentials 模式，或由 teamusers 运维显式调大 TTL。
+
+两种方式都未配置时服务拒绝启动。
 
 ## API
 

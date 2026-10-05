@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,10 +25,30 @@ const (
 	testAudience     = "teamusers"
 )
 
-// teamusersStub 模拟 teamusers 的 JWKS、权限查询与远程授权检查接口。
+// teamusersStub 模拟 teamusers 的 JWKS、client-credentials、权限查询与远程授权检查接口。
 type teamusersStub struct {
 	*httptest.Server
 	privateKey ed25519.PrivateKey
+
+	mu         sync.Mutex
+	credID     string
+	credSecret string
+	credTTL    int64
+	credCalls  int
+}
+
+// setClientCredentials 配置 stub 接受的服务账号凭证与签发的令牌有效期（秒）。
+func (s *teamusersStub) setClientCredentials(id, secret string, ttlSeconds int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credID, s.credSecret, s.credTTL = id, secret, ttlSeconds
+}
+
+// credentialCalls 返回 client-credentials 被调用的次数。
+func (s *teamusersStub) credentialCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.credCalls
 }
 
 func newTeamusersStub(t *testing.T) *teamusersStub {
@@ -52,8 +73,38 @@ func newTeamusersStub(t *testing.T) *teamusersStub {
 			}},
 		})
 	})
+	mux.HandleFunc("POST /auth/client-credentials", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ClientID     string `json:"client_id"`
+			ClientSecret string `json:"client_secret"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		stub.mu.Lock()
+		stub.credCalls++
+		expectedID, expectedSecret, ttlSeconds := stub.credID, stub.credSecret, stub.credTTL
+		stub.mu.Unlock()
+		if expectedID == "" || request.ClientID != expectedID || request.ClientSecret != expectedSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		token, err := stub.signJWT("msghub-service", "service", time.Duration(ttlSeconds)*time.Second)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  token,
+			"token_type":    "Bearer",
+			"expires_in":    ttlSeconds,
+			"refresh_token": "stub-refresh-token",
+		})
+	})
 	mux.HandleFunc("GET /authz/permissions/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testServiceToken {
+		if !stub.acceptServiceBearer(r) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -74,7 +125,7 @@ func newTeamusersStub(t *testing.T) *teamusersStub {
 		})
 	})
 	mux.HandleFunc("POST /authz/check", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testServiceToken {
+		if !stub.acceptServiceBearer(r) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -87,27 +138,70 @@ func newTeamusersStub(t *testing.T) *teamusersStub {
 	return stub
 }
 
-// sign 用测试私钥签一个 EdDSA JWT；claims 按 SDK 的校验要求给全。
+// sign 用测试私钥签一个 kind=user 的 EdDSA JWT；claims 按 SDK 的校验要求给全。
 func (s *teamusersStub) sign(t *testing.T, subject string) string {
 	t.Helper()
+	token, err := s.signJWT(subject, "user", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("签发测试 JWT 失败: %v", err)
+	}
+	return token
+}
+
+// signJWT 用测试私钥签一个 EdDSA JWT；claims 按 SDK 的校验要求给全。
+func (s *teamusersStub) signJWT(subject, kind string, ttl time.Duration) (string, error) {
 	headerJSON, err := json.Marshal(map[string]any{"alg": "EdDSA", "kid": testKeyID, "typ": "JWT"})
 	if err != nil {
-		t.Fatalf("编码 JWT 头失败: %v", err)
+		return "", err
 	}
 	claimsJSON, err := json.Marshal(map[string]any{
 		"iss":      testAudience,
 		"aud":      testAudience,
-		"exp":      time.Now().Add(5 * time.Minute).Unix(),
+		"exp":      time.Now().Add(ttl).Unix(),
 		"sub":      subject,
-		"kind":     "user",
+		"kind":     kind,
 		"perm_ver": 0,
 	})
 	if err != nil {
-		t.Fatalf("编码 JWT 声明失败: %v", err)
+		return "", err
 	}
 	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
 	signature := ed25519.Sign(s.privateKey, []byte(signingInput))
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+// acceptServiceBearer 接受静态测试令牌，或任何由本 stub 签发且 kind=service 的 JWT。
+func (s *teamusersStub) acceptServiceBearer(r *http.Request) bool {
+	fields := strings.Fields(r.Header.Get("Authorization"))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bearer") {
+		return false
+	}
+	if fields[1] == testServiceToken {
+		return true
+	}
+	parts := strings.Split(fields[1], ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Kind != "service" {
+		return false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	publicKey, ok := s.privateKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return false
+	}
+	return ed25519.Verify(publicKey, []byte(parts[0]+"."+parts[1]), signature)
 }
 
 // memRecords 是 httpapi.Records 接口的内存假实现，查询语义对齐 store：
@@ -315,6 +409,90 @@ func TestTeamusersAuth(t *testing.T) {
 		got := call(t, handler, "GET", "/api/v1/notifications", "", map[string]string{"Authorization": "Bearer " + granted})
 		if got.payload["records"] == nil || got.payload["total"].(float64) != 0 {
 			t.Fatalf("响应 = %v，期望空记录列表", got.payload)
+		}
+	})
+}
+
+// clientCredentialsAuth 构造 client-credentials 模式的鉴权组件。
+func clientCredentialsAuth(stub *teamusersStub, id, secret string) *TeamusersAuth {
+	return NewTeamusersAuth(TeamusersOptions{
+		BaseURL:        stub.URL,
+		Audience:       testAudience,
+		ClientID:       id,
+		ClientSecret:   secret,
+		Timeout:        5 * time.Second,
+		PermissionSend: "msghub:send:any",
+		PermissionRead: "msghub:read:any",
+	})
+}
+
+// TestTeamusersClientCredentials 覆盖 client-credentials 模式：自动换取服务令牌、缓存复用、
+// 临期自动刷新、凭证错误时启动失败并按 403 拒绝。
+func TestTeamusersClientCredentials(t *testing.T) {
+	t.Run("令牌缓存复用", func(t *testing.T) {
+		stub := newTeamusersStub(t)
+		stub.setClientCredentials("msghub", "s3cret", 3600)
+		handler := newTestServer(t, Options{Auth: clientCredentialsAuth(stub, "msghub", "s3cret")})
+
+		// 两个不同用户各自查一次权限；服务令牌只应换取一次。
+		for _, tc := range []struct {
+			subject    string
+			wantStatus int
+		}{{"granted", 200}, {"denied", 403}} {
+			got := call(t, handler, "GET", "/api/v1/notifications", "", map[string]string{"Authorization": "Bearer " + stub.sign(t, tc.subject)})
+			if got.status != tc.wantStatus {
+				t.Fatalf("%s 状态码 = %d，期望 %d，响应 %v", tc.subject, got.status, tc.wantStatus, got.payload)
+			}
+		}
+		if calls := stub.credentialCalls(); calls != 1 {
+			t.Fatalf("client-credentials 调用次数 = %d，期望 1（令牌应缓存复用）", calls)
+		}
+	})
+
+	t.Run("临期令牌自动刷新", func(t *testing.T) {
+		stub := newTeamusersStub(t)
+		stub.setClientCredentials("msghub", "s3cret", 1) // 有效期小于 30 秒提前刷新窗口
+		handler := newTestServer(t, Options{Auth: clientCredentialsAuth(stub, "msghub", "s3cret")})
+
+		for _, subject := range []string{"granted", "denied"} {
+			got := call(t, handler, "GET", "/api/v1/notifications", "", map[string]string{"Authorization": "Bearer " + stub.sign(t, subject)})
+			if got.status != 200 && got.status != 403 {
+				t.Fatalf("%s 状态码 = %d，响应 %v", subject, got.status, got.payload)
+			}
+		}
+		if calls := stub.credentialCalls(); calls < 2 {
+			t.Fatalf("client-credentials 调用次数 = %d，期望至少 2（临期令牌应重新签发）", calls)
+		}
+	})
+
+	t.Run("凭证错误启动失败并按 403 拒绝", func(t *testing.T) {
+		stub := newTeamusersStub(t)
+		stub.setClientCredentials("msghub", "s3cret", 3600)
+		auth := clientCredentialsAuth(stub, "msghub", "wrong-secret")
+		if err := auth.Prime(); err == nil {
+			t.Fatal("Prime() 应因凭证错误返回错误")
+		}
+		handler := newTestServer(t, Options{Auth: auth})
+
+		got := call(t, handler, "GET", "/api/v1/notifications", "", map[string]string{"Authorization": "Bearer " + stub.sign(t, "granted")})
+		if got.status != 403 {
+			t.Fatalf("状态码 = %d，期望 403，响应 %v", got.status, got.payload)
+		}
+		body, _ := got.payload["error"].(map[string]any)
+		message, _ := body["message"].(string)
+		if !strings.Contains(message, "authorization service unavailable") {
+			t.Fatalf("message = %q，应包含 SDK 给出的原因", message)
+		}
+	})
+
+	t.Run("Prime 预取令牌", func(t *testing.T) {
+		stub := newTeamusersStub(t)
+		stub.setClientCredentials("msghub", "s3cret", 3600)
+		if err := clientCredentialsAuth(stub, "msghub", "s3cret").Prime(); err != nil {
+			t.Fatalf("Prime() 返回错误: %v", err)
+		}
+		if calls := stub.credentialCalls(); calls != 1 {
+			t.Fatalf("client-credentials 调用次数 = %d，期望 1", calls)
 		}
 	})
 }

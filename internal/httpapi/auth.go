@@ -33,7 +33,9 @@ func PermissionClass(method, path string) (send, read bool) {
 type TeamusersOptions struct {
 	BaseURL        string        // teamusers 服务基址，例如 http://127.0.0.1:8080
 	Audience       string        // 期望的 JWT aud
-	ServiceToken   string        // 服务侧 Bearer Token，用于查询用户权限
+	ServiceToken   string        // 静态服务令牌（service access token），仅在未配置 client 凭证时使用
+	ClientID       string        // 服务账号 client_id，配置后自动换取并刷新服务令牌
+	ClientSecret   string        // 服务账号一次性密钥，与 ClientID 成对使用
 	Timeout        time.Duration // JWKS 与权限接口的 HTTP 超时
 	PermissionSend string        // 发送类接口要求的权限
 	PermissionRead string        // 查询类接口要求的权限
@@ -44,27 +46,43 @@ type TeamusersOptions struct {
 type TeamusersAuth struct {
 	verifier       *iam.Verifier
 	client         *iam.Client
+	tokenSource    *clientCredentialsTokenSource
 	permissionSend string
 	permissionRead string
 }
 
 // NewTeamusersAuth 构造 teamusers 鉴权组件；校验器与权限客户端共用一个带超时的 HTTP 客户端。
+// ClientID 与 ClientSecret 同时非空时走 client-credentials（自动换取并刷新令牌），否则使用静态 ServiceToken。
 func NewTeamusersAuth(opt TeamusersOptions) *TeamusersAuth {
 	httpClient := &http.Client{Timeout: opt.Timeout}
 	verifier := iam.NewVerifier(opt.BaseURL,
 		iam.WithHTTPClient(httpClient),
 		iam.WithAudience(opt.Audience),
 	)
-	permissions := iam.NewPermissionsClient(opt.BaseURL,
-		iam.WithHTTPClient(httpClient),
-		iam.WithServiceToken(opt.ServiceToken),
-	)
+	permissionOptions := []any{iam.WithHTTPClient(httpClient)}
+	var tokenSource *clientCredentialsTokenSource
+	if opt.ClientID != "" && opt.ClientSecret != "" {
+		tokenSource = newClientCredentialsTokenSource(opt.BaseURL, opt.ClientID, opt.ClientSecret, httpClient)
+		permissionOptions = append(permissionOptions, iam.WithTokenSource(tokenSource.Token))
+	} else {
+		permissionOptions = append(permissionOptions, iam.WithServiceToken(opt.ServiceToken))
+	}
+	permissions := iam.NewPermissionsClient(opt.BaseURL, permissionOptions...)
 	return &TeamusersAuth{
 		verifier:       verifier,
 		client:         iam.NewClient(verifier, permissions),
+		tokenSource:    tokenSource,
 		permissionSend: opt.PermissionSend,
 		permissionRead: opt.PermissionRead,
 	}
+}
+
+// Prime 在启动时预取服务令牌（client-credentials 模式）；静态令牌模式下为空操作。
+func (a *TeamusersAuth) Prime() error {
+	if a.tokenSource == nil {
+		return nil
+	}
+	return a.tokenSource.Prime()
 }
 
 // Verify 校验 Bearer JWT 并返回其中的身份声明。
