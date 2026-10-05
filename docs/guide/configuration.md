@@ -35,7 +35,7 @@ The template at the repository root lists every switch with inline comments:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `NOTIFY_TEAMUSERS_URL` | empty | teamusers service address; when set it takes over `/api/*` authentication (JWT + permission checks). |
+| `NOTIFY_TEAMUSERS_URL` | empty | teamusers service address (`http://` may be omitted and defaults to http); when set it takes over `/api/*` authentication (JWT + permission checks). |
 | `NOTIFY_TEAMUSERS_AUDIENCE` | `teamusers` | Expected JWT `aud`. |
 | `NOTIFY_TEAMUSERS_CLIENT_ID` | empty | Service account `client_id` (the teamusers username); with the matching secret msghub exchanges and refreshes the service token automatically (recommended). |
 | `NOTIFY_TEAMUSERS_CLIENT_SECRET` | empty | One-time service account secret; must be set together with `..._CLIENT_ID`. |

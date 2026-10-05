@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -131,6 +132,13 @@ func run() error {
 
 	// teamusers 鉴权：配置了 NOTIFY_TEAMUSERS_URL 就由 teamusers 接管 /api/* 鉴权，静态 Token 退场。
 	teamusersURL := strings.TrimSpace(envStr("NOTIFY_TEAMUSERS_URL", ""))
+	if teamusersURL != "" {
+		normalized, err := normalizeTeamusersURL(teamusersURL)
+		if err != nil {
+			return err
+		}
+		teamusersURL = normalized
+	}
 	teamusersAudience := envStr("NOTIFY_TEAMUSERS_AUDIENCE", "teamusers")
 	teamusersPermSend := envStr("NOTIFY_TEAMUSERS_PERMISSION_SEND", httpapi.DefaultPermissionSend)
 	teamusersPermRead := envStr("NOTIFY_TEAMUSERS_PERMISSION_READ", httpapi.DefaultPermissionRead)
@@ -337,6 +345,26 @@ func newLogger(level string) *slog.Logger {
 		lv = slog.LevelInfo
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lv}))
+}
+
+// normalizeTeamusersURL 校验并规范化 teamusers 服务地址：允许省略 scheme（按 http:// 处理），
+// 去掉结尾斜杠；其它不合法形式直接报错，避免启动后在请求构造处才报出难懂的 URL 解析错误。
+func normalizeTeamusersURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("NOTIFY_TEAMUSERS_URL 不能为空")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		parsed, err = url.Parse("http://" + trimmed)
+		if err != nil || parsed.Host == "" {
+			return "", fmt.Errorf("NOTIFY_TEAMUSERS_URL 不是合法的服务地址: %q", raw)
+		}
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("NOTIFY_TEAMUSERS_URL 只支持 http/https，收到 %q", raw)
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func envStr(key, fallback string) string {

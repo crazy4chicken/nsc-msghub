@@ -81,7 +81,7 @@ SELECT "time", channel, recipients, subject, body FROM nsc_msghub.outbox_message
 | `NOTIFY_DATABASE_URL` | 必填 | PostgreSQL 连接串；留空时拒绝启动。首次启动自动创建 schema `nsc_msghub` 与三张表（schema 已存在则不需要任何权限） |
 | `NOTIFY_RECORD_LIMIT` | `0` | 投递记录保留条数；`0` = 全部保留，`>0` = 每次写入后只保留最新 N 条 |
 | `NOTIFY_TOKEN` | 空 | 静态 Token；设置后 `/api/*` 需要 `Authorization: Bearer <token>`。仅在未配置 `NOTIFY_TEAMUSERS_URL` 时生效 |
-| `NOTIFY_TEAMUSERS_URL` | 空 | teamusers 服务地址；设置后由 teamusers 接管 `/api/*` 鉴权（JWT + 权限校验） |
+| `NOTIFY_TEAMUSERS_URL` | 空 | teamusers 服务地址（可省略 `http://`，默认按 http 处理）；设置后由 teamusers 接管 `/api/*` 鉴权（JWT + 权限校验） |
 | `NOTIFY_TEAMUSERS_AUDIENCE` | `teamusers` | 期望的 JWT `aud` |
 | `NOTIFY_TEAMUSERS_CLIENT_ID` | 空 | 服务账号 `client_id`（teamusers 用户名）；与下面一项成对配置后自动换取并刷新服务令牌（推荐） |
 | `NOTIFY_TEAMUSERS_CLIENT_SECRET` | 空 | 服务账号一次性密钥；与 `..._CLIENT_ID` 必须同时配置，只配一半会拒绝启动 |
