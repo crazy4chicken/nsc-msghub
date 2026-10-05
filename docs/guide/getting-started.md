@@ -49,8 +49,10 @@ go build -o msghub .
 ./msghub
 ```
 
-The schema (`notifications`, `users`, `outbox_messages`) is created idempotently
-at startup; the database user needs table-create rights on the first start.
+The three tables (`notifications`, `users`, `outbox_messages`) are created
+idempotently at startup inside the fixed `nsc_msghub` schema — nothing is
+created in `public`. The role needs `CREATE` on the database for that first
+start, or a DBA pre-creates the schema.
 
 Check the process and the resolved configuration:
 
@@ -78,7 +80,7 @@ The user id must exist in the configured user directory; with the default
 PostgreSQL table, seed it with SQL:
 
 ```sql
-INSERT INTO users (id, name, channels) VALUES
+INSERT INTO nsc_msghub.users (id, name, channels) VALUES
   ('u1001', 'Zhang San', '{"email": "zhangsan@example.com"}')
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, channels = EXCLUDED.channels;
 ```
@@ -99,7 +101,7 @@ Neither switch changes the API. Their records get status `simulated`, which
 stays distinguishable from a real `sent`. Inspect the simulated messages with:
 
 ```sql
-SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY seq DESC LIMIT 20;
+SELECT "time", channel, recipients, subject, body FROM nsc_msghub.outbox_messages ORDER BY seq DESC LIMIT 20;
 ```
 
 ## Next steps

@@ -7,10 +7,10 @@ outline: 2
 
 Configuration comes entirely from environment variables, plus a `.env` file
 when present (real environment variables win). There is no configuration API;
-all persistent state lives in PostgreSQL, whose schema is created idempotently
-at startup. Precedence is **CLI flag > environment variable > `.env` > built-in
-default**; flags are parsed after `.env` is loaded, so `.env` values also act as
-flag defaults.
+all persistent state lives in PostgreSQL, in the fixed `nsc_msghub` schema that
+is created idempotently at startup. Precedence is **CLI flag > environment
+variable > `.env` > built-in default**; flags are parsed after `.env` is loaded,
+so `.env` values also act as flag defaults.
 
 The template at the repository root lists every switch with inline comments:
 [`.env.example`](https://github.com/crazy4chicken/nsc-msghub/blob/main/.env.example).
@@ -24,7 +24,7 @@ The template at the repository root lists every switch with inline comments:
 | `NOTIFY_BRAND` | `notify-service` | Email shell header and fallback sender display name. |
 | `NOTIFY_MAIL_FOOTER` | auto-generated | Email shell footer text. |
 | `NOTIFY_ADDR` | `127.0.0.1:8090` | Listen address; `0.0.0.0:8090` exposes it to other hosts. |
-| `NOTIFY_DATABASE_URL` | required | PostgreSQL DSN (e.g. `postgres://user:pass@host:5432/db?sslmode=disable`). Empty makes the service refuse to start; the schema is created at first startup with `CREATE TABLE IF NOT EXISTS` only. |
+| `NOTIFY_DATABASE_URL` | required | PostgreSQL DSN (e.g. `postgres://user:pass@host:5432/db?sslmode=disable`). Empty makes the service refuse to start. Objects live in the fixed `nsc_msghub` schema. The service checks the catalog and only runs `CREATE SCHEMA` when the schema is missing, so the role needs `CREATE` on the database only for that first start — a DBA can pre-create the schema instead (`CREATE SCHEMA nsc_msghub AUTHORIZATION <role>;`), which then needs no database-level privilege. |
 | `NOTIFY_RECORD_LIMIT` | `0` | Delivery records to keep: `0` keeps everything; when `>0` only the newest N records survive, pruned after each insert. |
 | `NOTIFY_TOKEN` | empty | Static token; when set, `/api/*` requires `Authorization: Bearer <token>` (an `X-Notify-Token` header is also accepted). Only effective while `NOTIFY_TEAMUSERS_URL` is unset. |
 | `NOTIFY_LOG_LEVEL` | `info` | `debug` logs every HTTP request. |
@@ -128,7 +128,7 @@ The local user table lives in the PostgreSQL `users` table (`id`, `name`,
 `channels` JSONB) and is maintained with SQL:
 
 ```sql
-INSERT INTO users (id, name, channels) VALUES
+INSERT INTO nsc_msghub.users (id, name, channels) VALUES
   ('u1001', 'Zhang San', '{"email": "zhangsan@example.com", "sms": "13800000000"}')
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, channels = EXCLUDED.channels;
 ```
@@ -162,12 +162,19 @@ another one.
 
 ## Storage and records
 
-PostgreSQL is the only persistent state. At startup the service creates three
-tables idempotently (plain `CREATE TABLE IF NOT EXISTS`): `notifications`
-(delivery records), `users` (the local user table), and `outbox_messages`
-(simulated emails and SMS messages). The database must be reachable, and its
-user needs table-create rights on the first start; there is no migration
-tooling beyond that auto-DDL.
+PostgreSQL is the only persistent state. Everything lives in the fixed
+`nsc_msghub` schema — nothing is created in `public`. At startup the service
+runs `CREATE SCHEMA IF NOT EXISTS nsc_msghub` and then creates three tables
+idempotently (plain `CREATE TABLE IF NOT EXISTS`): `notifications` (delivery
+records), `users` (the local user table), and `outbox_messages` (simulated
+emails and SMS messages). The database must be reachable; the role therefore
+needs `CREATE` on the database for the first start, or a DBA pre-creates the
+schema (`CREATE SCHEMA nsc_msghub AUTHORIZATION <role>;`) — an existing schema
+needs no privileges. There is no migration tooling beyond that auto-DDL.
+
+The connection pool pins `search_path` to `nsc_msghub`, so unqualified table
+names resolve there. In psql either run `SET search_path TO nsc_msghub;` or
+qualify names explicitly (the examples below do the latter).
 
 Every attempt is inserted into `notifications`; with `NOTIFY_RECORD_LIMIT` set
 to `>0`, each insert also prunes all but the newest N records (`0`, the default,
@@ -181,5 +188,5 @@ via the query parameters of `GET /api/v1/notifications`.
 are enabled; inspect simulated deliveries with:
 
 ```sql
-SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY seq DESC LIMIT 20;
+SELECT "time", channel, recipients, subject, body FROM nsc_msghub.outbox_messages ORDER BY seq DESC LIMIT 20;
 ```

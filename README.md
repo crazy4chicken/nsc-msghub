@@ -18,7 +18,7 @@
 - 投递记录持久化在 PostgreSQL 的 `notifications` 表，可按渠道、类型、状态、用户 id 查询；
   失败同样记录原因；`NOTIFY_RECORD_LIMIT` 可限制只保留最新 N 条。
 - 配置只来自环境变量（存在 `.env` 时读取，真实环境变量优先）。没有配置接口；唯一持久化状态在
-  PostgreSQL（`NOTIFY_DATABASE_URL`，必填），三张表在启动时用 `CREATE TABLE IF NOT EXISTS` 幂等创建。
+  PostgreSQL（`NOTIFY_DATABASE_URL`，必填），三张表幂等创建在固定 schema `nsc_msghub` 中，不占用 `public`。
 - `/api/*` 鉴权两选一：静态 Bearer Token，或配置 teamusers（IAM）后改由 JWT + 权限校验接管
   （401/403 语义，`NOTIFY_TEAMUSERS_URL`）；对浏览器客户端开放 CORS；含 panic 恢复中间件与优雅退出。
 - 除官方 teamusers SDK（`github.com/crazy4chicken/nsc-teamusers/sdk/go`，只在启用 IAM 鉴权时用到）
@@ -61,7 +61,7 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/notify \
 `NOTIFY_SMS_SIMULATE=1` 会把短信同样写进该表。两个开关都不改变 API。查看模拟产物：
 
 ```sql
-SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY seq DESC LIMIT 20;
+SELECT "time", channel, recipients, subject, body FROM nsc_msghub.outbox_messages ORDER BY seq DESC LIMIT 20;
 ```
 
 ## 部署
@@ -78,7 +78,7 @@ SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY 
 | `NOTIFY_BRAND` | `notify-service` | 邮件外壳页眉与默认发件人显示名 |
 | `NOTIFY_MAIL_FOOTER` | 自动生成 | 邮件外壳页脚文案 |
 | `NOTIFY_ADDR` | `127.0.0.1:8090` | 监听地址；`0.0.0.0:8090` 供外部访问 |
-| `NOTIFY_DATABASE_URL` | 必填 | PostgreSQL 连接串；留空时拒绝启动，首次启动用 `CREATE TABLE IF NOT EXISTS` 自动建表 |
+| `NOTIFY_DATABASE_URL` | 必填 | PostgreSQL 连接串；留空时拒绝启动。首次启动自动创建 schema `nsc_msghub` 与三张表（schema 已存在则不需要任何权限） |
 | `NOTIFY_RECORD_LIMIT` | `0` | 投递记录保留条数；`0` = 全部保留，`>0` = 每次写入后只保留最新 N 条 |
 | `NOTIFY_TOKEN` | 空 | 静态 Token；设置后 `/api/*` 需要 `Authorization: Bearer <token>`。仅在未配置 `NOTIFY_TEAMUSERS_URL` 时生效 |
 | `NOTIFY_TEAMUSERS_URL` | 空 | teamusers 服务地址；设置后由 teamusers 接管 `/api/*` 鉴权（JWT + 权限校验） |
@@ -206,7 +206,7 @@ Markdown 支持通知场景够用的子集：标题、粗体、斜体、行内�
 本地用户表存放在 PostgreSQL 的 `users` 表（`id`、`name`、`channels` JSONB），直接用 SQL 维护：
 
 ```sql
-INSERT INTO users (id, name, channels) VALUES
+INSERT INTO nsc_msghub.users (id, name, channels) VALUES
   ('u1001', '张三', '{"email": "zhangsan@example.com", "sms": "13800000000"}')
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, channels = EXCLUDED.channels;
 ```

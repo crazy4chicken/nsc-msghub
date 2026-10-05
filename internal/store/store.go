@@ -32,9 +32,27 @@ type Filter struct {
 	Limit   int
 }
 
-// schema 是启动时执行的建表语句，全部幂等：已存在的对象不会被改动。
+// Schema 是本服务固定的 PostgreSQL schema：三张表都建在这里，不占用 public，
+// 因此建表只依赖本 schema 的权限，而不是 public 的 CREATE 权限。
+const Schema = "nsc_msghub"
+
+// PoolConfig 解析 DSN 并把 search_path 固定到项目 schema：所有未限定的表名都落在该 schema 内。
+func PoolConfig(dsn string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("解析 PostgreSQL 连接串失败: %w", err)
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = Schema
+	return cfg, nil
+}
+
+// ddl 是启动时执行的建表语句，全部幂等：已存在的对象不会被改动。
+// 语句不带 schema 前缀，依赖连接上的 search_path（见 PoolConfig）。
 // "time" 与 "type" 是保留字，一律带引号。
-const schema = `
+const ddl = `
 CREATE TABLE IF NOT EXISTS notifications (
     seq BIGSERIAL PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
@@ -96,9 +114,20 @@ const pruneRecords = `
 DELETE FROM notifications
 WHERE seq < (SELECT seq FROM notifications ORDER BY seq DESC OFFSET $1 - 1 LIMIT 1)`
 
-// Migrate 创建（如不存在）通知记录、用户表与 outbox 表结构，启动时执行一次。
+// Migrate 创建（如不存在）项目 schema 与三张表，启动时执行一次。
+// PostgreSQL 的 CREATE SCHEMA IF NOT EXISTS 会无条件校验建库权限，所以这里先查 catalog：
+// schema 已存在时（例如由 DBA 预先创建）不需要任何建库权限。
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, Schema).Scan(&exists); err != nil {
+		return fmt.Errorf("检查 schema %s 是否存在失败: %w", Schema, err)
+	}
+	if !exists {
+		if _, err := pool.Exec(ctx, "CREATE SCHEMA "+Schema); err != nil {
+			return fmt.Errorf("创建 schema %s 失败（需要数据库的 CREATE 权限，或由 DBA 预先执行 CREATE SCHEMA %s AUTHORIZATION <运行用户>）: %w", Schema, Schema, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, ddl); err != nil {
 		return err
 	}
 	return nil
@@ -116,7 +145,11 @@ func Open(ctx context.Context, dsn string, recordLimit int, logger *slog.Logger)
 	if strings.TrimSpace(dsn) == "" {
 		return nil, fmt.Errorf("连接 PostgreSQL 失败: %w", errors.New("必须配置 NOTIFY_DATABASE_URL（PostgreSQL 连接串）"))
 	}
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := PoolConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("连接 PostgreSQL 失败: %w", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("连接 PostgreSQL 失败: %w", err)
 	}

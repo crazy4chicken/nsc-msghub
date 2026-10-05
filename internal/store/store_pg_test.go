@@ -24,7 +24,11 @@ func testStore(t *testing.T, recordLimit int) (*Store, *pgxpool.Pool) {
 		t.Skip("set NOTIFY_TEST_DATABASE_URL to run PostgreSQL integration tests")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := PoolConfig(dsn)
+	if err != nil {
+		t.Fatalf("解析测试库连接串失败: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("连接测试库失败: %v", err)
 	}
@@ -59,6 +63,33 @@ func recordIDsOf(recs []notify.Record) []string {
 		ids = append(ids, rec.ID)
 	}
 	return ids
+}
+
+// TestTablesLiveInProjectSchema 确认服务对象都在项目 schema 内：连接上的 search_path 指向 nsc_msghub，
+// 三张表也建在那里，未限定的表名不会落到 public。
+func TestTablesLiveInProjectSchema(t *testing.T) {
+	st, pool := testStore(t, 0)
+	if st == nil {
+		t.Fatal("Store 为空")
+	}
+	ctx := context.Background()
+
+	var current string
+	if err := pool.QueryRow(ctx, "SELECT current_schema()").Scan(&current); err != nil {
+		t.Fatalf("查询 current_schema 失败: %v", err)
+	}
+	if current != Schema {
+		t.Fatalf("current_schema() = %q，期望 %q", current, Schema)
+	}
+	for _, table := range []string{"notifications", "users", "outbox_messages"} {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`, Schema, table).Scan(&count); err != nil {
+			t.Fatalf("查询 %s 所属 schema 失败: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("表 %s 不在 schema %s 中（count=%d）", table, Schema, count)
+		}
+	}
 }
 
 // TestSaveListOrderingAndFilters 覆盖 Save→List 的时间倒序与各筛选维度。

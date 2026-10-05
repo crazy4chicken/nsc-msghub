@@ -110,8 +110,17 @@ systemctl daemon-reload && systemctl enable --now nsc-msghub
 ```
 
 PostgreSQL is the service's only persistent state: it must be reachable at
-`NOTIFY_DATABASE_URL`, and the database user needs table-create rights on the
-first start (the service only runs `CREATE TABLE IF NOT EXISTS`). The test page
+`NOTIFY_DATABASE_URL`. All objects live in the fixed `nsc_msghub` schema and
+never in `public`. The first start runs `CREATE SCHEMA IF NOT EXISTS nsc_msghub`
+followed by `CREATE TABLE IF NOT EXISTS` for the three tables, so the role needs
+`CREATE` on the database — or a DBA pre-creates the schema for it:
+
+```sql
+CREATE SCHEMA nsc_msghub AUTHORIZATION msghub_app; -- the runtime role now owns it
+```
+
+An already existing schema needs no privileges: the service probes the catalog
+first and only issues `CREATE SCHEMA` when the schema is missing. The test page
 is served from the directory given by `NOTIFY_WEB_DIR` (it must contain
 `index.html`); production usually leaves it empty to turn the page off.
 
@@ -138,7 +147,7 @@ services:
       # sha256: "0000000000000000000000000000000000000000000000000000000000000000" # 64 hex chars; optional single-arch pin, otherwise svchost uses the GitHub asset digest
     env:
       NOTIFY_ADDR: "0.0.0.0:8090" # use "${HOST}:${PORT}" when the Host should assign the port
-      NOTIFY_DATABASE_URL: "${HOST:MSGHUB_DATABASE_URL}" # required PostgreSQL DSN; the DB must be reachable and the user needs table-create rights at first start
+      NOTIFY_DATABASE_URL: "${HOST:MSGHUB_DATABASE_URL}" # required PostgreSQL DSN; objects live in the nsc_msghub schema (created idempotently) — the role needs CREATE on the database or a pre-created schema
       NOTIFY_ROUTES: "alert=email,sms;digest=email;default=email"
       NOTIFY_SMTP_HOST: smtp.qq.com
       NOTIFY_SMTP_PORT: "465"
@@ -228,9 +237,15 @@ A ready-to-use copy is checked in at the repository root:
   guide).
 - systemd: stop the service, replace `/usr/local/bin/msghub`, start it again; the
   environment file stays untouched and the PostgreSQL state is untouched.
-- Data compatibility: the service only runs `CREATE TABLE IF NOT EXISTS` at
-  startup; upgrades and rollbacks neither drop nor rewrite existing tables.
-  There is no data directory anymore — PostgreSQL backups are `pg_dump`'s job.
+- Data compatibility: the service only runs `CREATE SCHEMA` (when missing) and
+  `CREATE TABLE IF NOT EXISTS` at startup; upgrades and rollbacks neither drop
+  nor rewrite existing tables. There is no data directory anymore — PostgreSQL
+  backups are `pg_dump`'s job, scoped to the fixed schema
+  (`pg_dump -n nsc_msghub <db>`).
+- Objects live in `nsc_msghub`, so rows written by earlier versions into
+  `public` are not migrated automatically. Move them once if they matter, e.g.
+  `ALTER TABLE public.notifications SET SCHEMA nsc_msghub;` (same for `users`
+  and `outbox_messages`), then drop the empty `public` leftovers.
 - After a rollback, check that `version` on `/healthz` matches the target and
   confirm no old process is still around (a busy port makes startup fail
   immediately).

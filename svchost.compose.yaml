@@ -15,7 +15,7 @@ services:
       # sha256: "0000000000000000000000000000000000000000000000000000000000000000" # 64 hex chars; optional single-arch pin, otherwise svchost uses the GitHub asset digest
     env:
       NOTIFY_ADDR: "0.0.0.0:8090" # use "${HOST}:${PORT}" when the Host should assign the port
-      NOTIFY_DATABASE_URL: "${HOST:MSGHUB_DATABASE_URL}" # required PostgreSQL DSN; the DB must be reachable and the user needs table-create rights at first start
+      NOTIFY_DATABASE_URL: "${HOST:MSGHUB_DATABASE_URL}" # required PostgreSQL DSN; objects live in the nsc_msghub schema (created idempotently) — the role needs CREATE on the database or a pre-created schema
       NOTIFY_ROUTES: "alert=email,sms;digest=email;default=email"
       NOTIFY_SMTP_HOST: smtp.qq.com
       NOTIFY_SMTP_PORT: "465"
