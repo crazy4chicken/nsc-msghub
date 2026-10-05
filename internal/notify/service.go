@@ -14,7 +14,7 @@ import (
 // 记录状态。
 const (
 	StatusSent      = "sent"      // 真实投递成功
-	StatusSimulated = "simulated" // dev 模式：本地落盘/打日志，未真实投递
+	StatusSimulated = "simulated" // dev 模式：只写 outbox 表/打日志，未真实投递
 	StatusFailed    = "failed"    // 投递失败或请求非法
 )
 
@@ -43,7 +43,7 @@ type Record struct {
 
 // Recorder 持久化发送记录。记录失败不影响发送结果，只打日志。
 type Recorder interface {
-	Save(Record) error
+	Save(ctx context.Context, rec Record) error
 }
 
 // Service 是统一通知入口：解析模板 → 校验 → 交给对应通道 → 落记录。
@@ -137,7 +137,7 @@ func (s *Service) Send(ctx context.Context, msg Message) (Record, error) {
 		rec.Error = err.Error()
 		rec.DurationMS = time.Since(rec.Time).Milliseconds()
 		rec.BodyPreview = preview(m.Body, 120)
-		s.persist(rec)
+		s.persist(ctx, rec)
 		s.log.Warn("通知发送失败",
 			"id", rec.ID, "channel", rec.Channel, "type", rec.Type,
 			"user", rec.UserID, "to", maskAll(rec.To), "error", err.Error())
@@ -194,7 +194,7 @@ func (s *Service) Send(ctx context.Context, msg Message) (Record, error) {
 	rec.BodyPreview = preview(delivery.Text, 120)
 	if err != nil {
 		rec.Error = err.Error()
-		s.persist(rec)
+		s.persist(ctx, rec)
 		s.log.Warn("通知发送失败",
 			"id", rec.ID, "channel", rec.Channel, "type", rec.Type,
 			"user", rec.UserID, "to", maskAll(rec.To), "error", err.Error())
@@ -212,7 +212,7 @@ func (s *Service) Send(ctx context.Context, msg Message) (Record, error) {
 	} else {
 		rec.Status = StatusSent
 	}
-	s.persist(rec)
+	s.persist(ctx, rec)
 	s.log.Info("通知已发送",
 		"id", rec.ID, "channel", rec.Channel, "type", rec.Type,
 		"user", rec.UserID, "provider", rec.Provider,
@@ -224,7 +224,7 @@ func (s *Service) Send(ctx context.Context, msg Message) (Record, error) {
 // 否则按 type 的路由规则挑第一个"有地址且通道可用"的渠道。
 func (s *Service) routeToUser(ctx context.Context, m *Message, rec *Record) error {
 	if s.resolver == nil {
-		return NotReadyf("未配置用户目录，无法按 user 发通知：请设置 NOTIFY_USER_SERVICE_URL 或 NOTIFY_USERS_FILE")
+		return NotReadyf("未配置用户目录，无法按 user 发通知：请设置 NOTIFY_USER_SERVICE_URL 或准备 PostgreSQL users 表")
 	}
 	user, err := s.resolver.Resolve(ctx, m.User)
 	if err != nil {
@@ -263,11 +263,11 @@ func (s *Service) routeToUser(ctx context.Context, m *Message, rec *Record) erro
 	return routeError(m.User, m.Type, candidates, missing, notReady)
 }
 
-func (s *Service) persist(rec Record) {
+func (s *Service) persist(ctx context.Context, rec Record) {
 	if s.recorder == nil {
 		return
 	}
-	if err := s.recorder.Save(rec); err != nil {
+	if err := s.recorder.Save(ctx, rec); err != nil {
 		s.log.Error("写入发送记录失败", "id", rec.ID, "error", err.Error())
 	}
 }

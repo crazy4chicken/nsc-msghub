@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -30,42 +28,38 @@ type SMSProvider interface {
 	Send(ctx context.Context, phone, text string) (string, error)
 }
 
-// ConsoleSMSProvider 把短信写到日志与 outbox 文件，用于本地演示与联调；
+// ConsoleSMSProvider 把短信写到日志与 outbox_messages 表，用于本地演示与联调；
 // 它不产生任何真实费用，也不依赖短信平台审核。
 type ConsoleSMSProvider struct {
-	OutboxDir string
-	Log       *slog.Logger
+	outbox notify.OutboxWriter
+	log    *slog.Logger
 }
 
-// NewConsoleSMSProvider 创建本地模拟短信上游。
-func NewConsoleSMSProvider(outboxDir string, logger *slog.Logger) *ConsoleSMSProvider {
+// NewConsoleSMSProvider 创建本地模拟短信上游；outbox 为 nil 时只打日志、不落库。
+func NewConsoleSMSProvider(outbox notify.OutboxWriter, logger *slog.Logger) *ConsoleSMSProvider {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ConsoleSMSProvider{OutboxDir: outboxDir, Log: logger}
+	return &ConsoleSMSProvider{outbox: outbox, log: logger}
 }
 
 func (p *ConsoleSMSProvider) Name() string { return "console" }
 func (p *ConsoleSMSProvider) Mode() string { return "dev" }
 func (p *ConsoleSMSProvider) Ready() bool  { return true }
 
-func (p *ConsoleSMSProvider) Send(_ context.Context, phone, text string) (string, error) {
+func (p *ConsoleSMSProvider) Send(ctx context.Context, phone, text string) (string, error) {
 	id := "sim_" + shortID()
-	p.Log.Info("dev 模式：短信未真实发送", "to", notify.Mask(phone), "text", text, "id", id)
-	if p.OutboxDir == "" {
+	p.log.Info("dev 模式：短信未真实发送", "to", notify.Mask(phone), "text", text, "id", id)
+	if p.outbox == nil {
 		return id, nil
 	}
-	if err := os.MkdirAll(p.OutboxDir, 0o755); err != nil {
-		return "", notify.NotReadyf("创建短信 outbox 目录失败: %v", err)
-	}
-	line := fmt.Sprintf("%s\t%s\t%s\t%s\n", time.Now().Format(time.RFC3339), phone, id, text)
-	path := filepath.Join(p.OutboxDir, "sms.log")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return "", notify.NotReadyf("写入短信 outbox 失败: %v", err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(line); err != nil {
+	if err := p.outbox.SaveOutbox(ctx, notify.OutboxMessage{
+		Time:       time.Now(),
+		Channel:    notify.ChannelSMS,
+		MessageID:  id,
+		Recipients: []string{phone},
+		Body:       text,
+	}); err != nil {
 		return "", notify.NotReadyf("写入短信 outbox 失败: %v", err)
 	}
 	return id, nil
@@ -107,7 +101,7 @@ func (n *SMSNotifier) Describe() notify.Status {
 	}
 	if status.Mode == "dev" {
 		status.Details = map[string]string{
-			"hint": "当前是本地模拟上游（NOTIFY_SMS_SIMULATE=1），短信只打日志/写 outbox，不会真实发送",
+			"hint": "当前是本地模拟上游（NOTIFY_SMS_SIMULATE=1），短信只打日志并写入 outbox_messages 表，不会真实发送",
 		}
 	}
 	return status

@@ -16,8 +16,6 @@ import (
 	"mime"
 	"net"
 	"net/smtp"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -135,28 +133,28 @@ func (c EmailConfig) Validate() error {
 }
 
 // EmailNotifier 是邮件通道。配置来自环境变量，进程启动后不再变化；
-// 未配置 SMTP 时，若显式开启 outbox（NOTIFY_DEV_OUTBOX=1），邮件会写盘而不投递。
+// 未配置 SMTP 时，若显式开启 outbox（NOTIFY_DEV_OUTBOX=1），邮件会写入 outbox_messages 表而不投递。
 type EmailNotifier struct {
 	cfg     EmailConfig
-	outbox  string
+	outbox  notify.OutboxWriter
 	ready   bool
 	devMode bool
 	reason  string
 	log     *slog.Logger
 }
 
-// NewEmailNotifier 创建邮件通道。outboxDir 非空表示允许 dev 兜底模式。
-func NewEmailNotifier(cfg EmailConfig, outboxDir string, logger *slog.Logger) *EmailNotifier {
+// NewEmailNotifier 创建邮件通道。outbox 非空表示允许 dev 兜底模式。
+func NewEmailNotifier(cfg EmailConfig, outbox notify.OutboxWriter, logger *slog.Logger) *EmailNotifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	cfg = cfg.WithDefaults()
-	n := &EmailNotifier{cfg: cfg, outbox: outboxDir, log: logger}
+	n := &EmailNotifier{cfg: cfg, outbox: outbox, log: logger}
 	if strings.TrimSpace(cfg.Host) == "" {
 		n.reason = "未配置发件邮箱（NOTIFY_SMTP_HOST 为空）"
-		if outboxDir != "" {
+		if outbox != nil {
 			n.devMode, n.ready = true, true
-			n.reason = "未配置发件邮箱，邮件只写入 outbox 目录（NOTIFY_DEV_OUTBOX=1）"
+			n.reason = "未配置发件邮箱，邮件只写入 outbox_messages 表（NOTIFY_DEV_OUTBOX=1）"
 		}
 		return n
 	}
@@ -179,7 +177,7 @@ func (n *EmailNotifier) Describe() notify.Status {
 		status.Ready = true
 		status.Mode = "dev"
 		status.Provider = "smtp-dev-outbox"
-		status.Details = map[string]string{"outbox": n.outbox, "hint": n.reason}
+		status.Details = map[string]string{"outbox": "outbox_messages", "hint": n.reason}
 	case n.ready:
 		status.Ready = true
 		status.Mode = "live"
@@ -221,21 +219,25 @@ func (n *EmailNotifier) Send(ctx context.Context, d notify.Delivery) (notify.Rec
 
 	if n.devMode {
 		raw, messageID := buildMIME(devConfig(n.cfg.Brand), to, subject, textBody, htmlBody)
-		if err := os.MkdirAll(n.outbox, 0o755); err != nil {
-			return notify.Receipt{}, notify.NotReadyf("创建 outbox 目录失败: %v", err)
+		if err := n.outbox.SaveOutbox(ctx, notify.OutboxMessage{
+			Time:       time.Now(),
+			Channel:    notify.ChannelEmail,
+			MessageID:  messageID,
+			Recipients: to,
+			Subject:    subject,
+			Body:       textBody,
+			Raw:        string(raw),
+		}); err != nil {
+			return notify.Receipt{}, notify.NotReadyf("写入 email outbox 失败: %v", err)
 		}
-		path := filepath.Join(n.outbox, time.Now().Format("20060102T150405")+"-"+shortID()+".eml")
-		if err := os.WriteFile(path, raw, 0o644); err != nil {
-			return notify.Receipt{}, notify.NotReadyf("写入 outbox 失败: %v", err)
-		}
-		n.log.Warn("dev 模式：邮件未投递，已写入 outbox", "path", path, "subject", subject)
+		n.log.Warn("dev 模式：邮件未投递，已写入 outbox_messages 表", "messageId", messageID, "subject", subject)
 		return notify.Receipt{
 			Channel:   notify.ChannelEmail,
 			Provider:  "smtp-dev-outbox",
 			MessageID: messageID,
 			Accepted:  to,
 			Simulated: true,
-			Detail:    "dev 模式：邮件写入 " + path,
+			Detail:    "dev 模式：邮件写入 outbox_messages 表",
 		}, nil
 	}
 

@@ -6,8 +6,8 @@
 ## 功能特性
 
 - 统一入口 `POST /api/v1/notify`。调用方不需要接触 SMTP、手机号或任何渠道细节。
-- 按用户 id 解析收件人，支持本地 JSON 用户表或用户服务 HTTP 契约（`{id}` 路径占位、可选 Bearer
-  Token、明确的 404/502 语义）。未配置用户目录时返回明确的 503。
+- 按用户 id 解析收件人，支持 PostgreSQL `users` 用户表或用户服务 HTTP 契约（`{id}` 路径占位、可选
+  Bearer Token、明确的 404/502 语义）。未配置用户目录时返回明确的 503。
 - 按通知类型路由，支持有序渠道优先级（`alert=email,sms;digest=email;default=email`）；
   请求里显式指定 `channel` 则跳过路由。无法路由时返回具体原因，不会静默改发别处。
 - 两个通道。邮件走 SMTP（隐式 TLS、STARTTLS 或明文），支持 PLAIN/LOGIN 认证与会话级超时；
@@ -15,19 +15,22 @@
 - Markdown 优先的正文。`bodyFormat` 取 `text`（默认，仅做 HTML 转义）或 `markdown`：
   邮件得到内联样式的 HTML 外壳加 `text/plain` 兜底，短信得到去掉语法的纯文本。
   裸 HTML 会被拒绝，且内容先整体转义再解析，调用方文本无法注入标签。
-- 追加写入的 JSONL 投递记录，可按渠道、类型、状态、用户 id 查询；失败同样记录原因。
-- 配置只来自环境变量（存在 `.env` 时读取，真实环境变量优先）。没有配置接口，没有数据库。
+- 投递记录持久化在 PostgreSQL 的 `notifications` 表，可按渠道、类型、状态、用户 id 查询；
+  失败同样记录原因；`NOTIFY_RECORD_LIMIT` 可限制只保留最新 N 条。
+- 配置只来自环境变量（存在 `.env` 时读取，真实环境变量优先）。没有配置接口；唯一持久化状态在
+  PostgreSQL（`NOTIFY_DATABASE_URL`，必填），三张表在启动时用 `CREATE TABLE IF NOT EXISTS` 幂等创建。
 - `/api/*` 鉴权两选一：静态 Bearer Token，或配置 teamusers（IAM）后改由 JWT + 权限校验接管
   （401/403 语义，`NOTIFY_TEAMUSERS_URL`）；对浏览器客户端开放 CORS；含 panic 恢复中间件与优雅退出。
 - 除官方 teamusers SDK（`github.com/crazy4chicken/nsc-teamusers/sdk/go`，只在启用 IAM 鉴权时用到）
-  外零第三方依赖，编译为单个自包含可执行文件。
+  与 PostgreSQL 驱动 `github.com/jackc/pgx/v5` 外零第三方依赖，编译为单个自包含可执行文件。
 
 ## 本地开发
 
-复制环境变量模板并填好发件邮箱；不填的话邮件通道不可用。
+准备一个可连的 PostgreSQL 数据库，复制环境变量模板并填好 `NOTIFY_DATABASE_URL`（必填）与发件邮箱；
+不填邮箱的话邮件通道不可用。首次启动会自动建表。
 
 ```sh
-cp .env.example .env      # NOTIFY_SMTP_HOST / _USER / _PASS（邮箱授权码）
+cp .env.example .env      # NOTIFY_DATABASE_URL；可选 NOTIFY_SMTP_HOST / _USER / _PASS（邮箱授权码）
 go build -o notify-service .
 ./notify-service
 ```
@@ -54,13 +57,17 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/notify \
 ```
 
 两条模拟路径**默认关闭**，因为"看起来发了、实际没出本机"比直接失败更危险：设
-`NOTIFY_DEV_OUTBOX=1` 会把邮件写进 `data/outbox/*.eml` 而不投递，设 `NOTIFY_SMS_SIMULATE=1`
-会把短信写进 `data/outbox/sms.log`。两个开关都不改变 API。
+`NOTIFY_DEV_OUTBOX=1` 会把邮件写进 PostgreSQL 的 `outbox_messages` 表而不投递，设
+`NOTIFY_SMS_SIMULATE=1` 会把短信同样写进该表。两个开关都不改变 API。查看模拟产物：
+
+```sql
+SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY seq DESC LIMIT 20;
+```
 
 ## 部署
 
-生产环境用 systemd 直接运行或交给 svchost 托管；发布产物契约、compose 示例、鉴权与升级/回滚步骤见
-[docs/guide/deploy.md](docs/guide/deploy.md)。
+生产环境用 systemd 直接运行或交给 svchost 托管；PostgreSQL 必须可达且库用户首次启动时具备建表权限。
+发布产物契约、compose 示例、鉴权与升级/回滚步骤见 [docs/guide/deploy.md](docs/guide/deploy.md)。
 
 在线文档（英文）：<https://crazy4chicken.github.io/nsc-msghub/>
 
@@ -71,7 +78,8 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/notify \
 | `NOTIFY_BRAND` | `notify-service` | 邮件外壳页眉与默认发件人显示名 |
 | `NOTIFY_MAIL_FOOTER` | 自动生成 | 邮件外壳页脚文案 |
 | `NOTIFY_ADDR` | `127.0.0.1:8090` | 监听地址；`0.0.0.0:8090` 供外部访问 |
-| `NOTIFY_DATA_DIR` | `data` | 投递记录、默认用户表、outbox |
+| `NOTIFY_DATABASE_URL` | 必填 | PostgreSQL 连接串；留空时拒绝启动，首次启动用 `CREATE TABLE IF NOT EXISTS` 自动建表 |
+| `NOTIFY_RECORD_LIMIT` | `0` | 投递记录保留条数；`0` = 全部保留，`>0` = 每次写入后只保留最新 N 条 |
 | `NOTIFY_TOKEN` | 空 | 静态 Token；设置后 `/api/*` 需要 `Authorization: Bearer <token>`。仅在未配置 `NOTIFY_TEAMUSERS_URL` 时生效 |
 | `NOTIFY_TEAMUSERS_URL` | 空 | teamusers 服务地址；设置后由 teamusers 接管 `/api/*` 鉴权（JWT + 权限校验） |
 | `NOTIFY_TEAMUSERS_AUDIENCE` | `teamusers` | 期望的 JWT `aud` |
@@ -87,16 +95,15 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/notify \
 | `NOTIFY_SMTP_FROM` | 取 `NOTIFY_SMTP_USER` | 发件地址；多数邮箱要求与账号一致 |
 | `NOTIFY_SMTP_FROM_NAME` | 取 `NOTIFY_BRAND` | 发件人显示名，按 RFC 2047 编码 |
 | `NOTIFY_SMTP_TIMEOUT` | `15` | 单次会话超时（秒） |
-| `NOTIFY_USERS_FILE` | `<data>/users.json` | 本地用户表 |
-| `NOTIFY_USER_SERVICE_URL` | 空 | 用户服务地址；设置后优先于本地用户表 |
+| `NOTIFY_USER_SERVICE_URL` | 空 | 用户服务地址；设置后优先于 PostgreSQL `users` 表 |
 | `NOTIFY_USER_SERVICE_PATH` | `/api/users/{id}` | 用户查询路径，必须含 `{id}` |
 | `NOTIFY_USER_SERVICE_TOKEN` | 空 | 访问用户服务的 Bearer Token |
 | `NOTIFY_USER_SERVICE_TIMEOUT` | `5` | 用户服务超时（秒） |
 | `NOTIFY_ROUTES` | `default=email` | 类型到渠道的优先级 |
-| `NOTIFY_SMS_SIMULATE` | `0` | 设为 `1` 使用本地模拟短信上游 |
-| `NOTIFY_DEV_OUTBOX` | `0` | 设为 `1` 把邮件写进 outbox 而不投递 |
+| `NOTIFY_SMS_SIMULATE` | `0` | 设为 `1` 使用本地模拟短信上游（写进 `outbox_messages` 表） |
+| `NOTIFY_DEV_OUTBOX` | `0` | 设为 `1` 把邮件写进 `outbox_messages` 表而不投递 |
 
-命令行参数覆盖常用项：`-brand`、`-addr`、`-data`、`-token`、`-log-level`。
+命令行参数覆盖常用项：`-brand`、`-addr`、`-database-url`、`-record-limit`、`-token`、`-log-level`。
 
 ## 鉴权
 
@@ -123,7 +130,7 @@ teamusers 签发的 JWT（`Authorization: Bearer <JWT>`），缺失或校验失�
 | `POST` | `/api/v1/channels/email/verify` | 发一封自检邮件，`{"to":["me@example.com"]}` |
 | `GET` | `/api/v1/notifications` | 投递记录；`?limit=&channel=&type=&status=&userId=` |
 | `GET` | `/api/v1/notifications/{id}` | 单条投递记录 |
-| `GET` | `/healthz` | 存活检查，无需 Token |
+| `GET` | `/healthz` | 存活检查，无需 Token；数据库不可达时返回 503 `degraded` |
 
 发送接口只接受一种收件人形式：`user`（由本服务解析）或 `to` / `target`（显式地址），
 同时提供会返回 400。`target` 还接受简写 `"a@example.com"`、`["a@example.com","b@example.com"]`
@@ -156,6 +163,7 @@ teamusers 签发的 JWT（`Authorization: Bearer <JWT>`），缺失或校验失�
 | `channel_not_ready` | 503 | 通道未配置、路由没有可用通道、未配置用户目录 |
 | `upstream_failed` | 502 | 用户服务出错或返回不可用的数据 |
 | `delivery_failed` | 502 | SMTP 拒收或无法连通 |
+| `storage_error` | 500 | 数据库不可达或读写失败 |
 
 ### 正文格式
 
@@ -173,14 +181,12 @@ Markdown 支持通知场景够用的子集：标题、粗体、斜体、行内�
 
 两种可互换的实现；两者都配置时用户服务优先。
 
-本地用户表（文件变更后自动重载）是 JSON 对象或数组：
+本地用户表存放在 PostgreSQL 的 `users` 表（`id`、`name`、`channels` JSONB），直接用 SQL 维护：
 
-```json
-{
-  "users": [
-    {"id": "u1001", "name": "张三", "channels": {"email": "zhangsan@example.com", "sms": "13800000000"}}
-  ]
-}
+```sql
+INSERT INTO users (id, name, channels) VALUES
+  ('u1001', '张三', '{"email": "zhangsan@example.com", "sms": "13800000000"}')
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, channels = EXCLUDED.channels;
 ```
 
 用户服务需要响应 `GET {URL}{PATH}`，返回 `200` 与用户对象：
@@ -200,7 +206,7 @@ Markdown 支持通知场景够用的子集：标题、粗体、斜体、行内�
 
 ## 发送记录
 
-每次尝试都会追加到 `data/notifications.jsonl`，内存保留最近 5000 条用于查询。记录里的
-`status` 为 `sent`（真实投递）、`simulated`（只写本地、未投递）或 `failed`，并带着
-`userId`、`userName`、最终选中的渠道，失败时还有错误原因——足以回答"发了什么、发给了谁、
-为什么没发出去"。
+每次尝试都会写入 PostgreSQL 的 `notifications` 表；`NOTIFY_RECORD_LIMIT` 大于 0 时，每次写入后只
+保留最新 N 条（默认 0 = 全部保留）。记录里的 `status` 为 `sent`（真实投递）、`simulated`（只写
+`outbox_messages` 表、未投递）或 `failed`，并带着 `userId`、`userName`、最终选中的渠道，失败时
+还有错误原因——足以回答"发了什么、发给了谁、为什么没发出去"。

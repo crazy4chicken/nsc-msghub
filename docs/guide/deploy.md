@@ -6,10 +6,10 @@ outline: 2
 # Deployment
 
 `nsc-msghub` is a single static executable. All configuration comes from
-environment variables and there is no database; the only persistent state is the
-data directory. This page covers the release artifact contract, running under
-systemd, hosting with svchost, teamusers authentication, upgrade and rollback,
-and self-checks.
+environment variables; PostgreSQL is the only persistent state and must be
+reachable from the service. This page covers the release artifact contract,
+running under systemd, hosting with svchost, teamusers authentication, upgrade
+and rollback, and self-checks.
 
 svchost field semantics and validation are defined by the official documentation:
 the [Compose configuration reference](https://github.com/crazy4chicken/nekostick-svchost/blob/main/docs/compose.md)
@@ -38,32 +38,31 @@ release notes link to this page.
 
 ## Running directly
 
-The CLI flags `-brand`, `-addr`, `-data`, `-token`, `-log-level`, `-web` override
-the corresponding environment variables. A `.env` file in the working directory
-is also read (real environment variables win; the path can be changed with
-`NOTIFY_ENV_FILE`). Under systemd / svchost, use the platform's own environment
-injection instead of relying on `.env`.
+The CLI flags `-brand`, `-addr`, `-database-url`, `-record-limit`, `-token`,
+`-log-level`, `-web` override the corresponding environment variables. A `.env`
+file in the working directory is also read (real environment variables win; the
+path can be changed with `NOTIFY_ENV_FILE`). Under systemd / svchost, use the
+platform's own environment injection instead of relying on `.env`.
 
 ### systemd
 
-Install the binary and the data directory (owned by the run user):
+Install the binary:
 
 ```sh
 install -m 0755 msghub /usr/local/bin/msghub
-install -d -o nsc-msghub -g nsc-msghub /var/lib/nsc-msghub
 ```
 
-Write `/etc/nsc-msghub.env` (mode 0600; it contains the SMTP auth code and the
-teamusers service token — quote values that contain spaces or `#`):
+Write `/etc/nsc-msghub.env` (mode 0600; it contains the SMTP auth code, the
+teamusers service token and the database DSN — quote values that contain spaces
+or `#`):
 
 ```sh
 NOTIFY_ADDR=0.0.0.0:8090
-NOTIFY_DATA_DIR=/var/lib/nsc-msghub
+NOTIFY_DATABASE_URL=postgres://msghub:password@127.0.0.1:5432/msghub?sslmode=disable
 NOTIFY_LOG_LEVEL=info
 
 # notification type -> channel priority
 NOTIFY_ROUTES=alert=email,sms;digest=email;default=email
-NOTIFY_USERS_FILE=/var/lib/nsc-msghub/users.json
 
 # sender mailbox
 NOTIFY_SMTP_HOST=smtp.qq.com
@@ -92,7 +91,6 @@ After=network-online.target
 Type=simple
 User=nsc-msghub
 Group=nsc-msghub
-WorkingDirectory=/var/lib/nsc-msghub
 EnvironmentFile=/etc/nsc-msghub.env
 ExecStart=/usr/local/bin/msghub
 Restart=on-failure
@@ -100,7 +98,6 @@ RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/nsc-msghub
 
 [Install]
 WantedBy=multi-user.target
@@ -110,12 +107,11 @@ WantedBy=multi-user.target
 systemctl daemon-reload && systemctl enable --now nsc-msghub
 ```
 
-`NOTIFY_DATA_DIR` must be a persistent absolute path writable by the run user.
-It holds `notifications.jsonl` (delivery records), `users.json` (the local user
-table), and `outbox/` (written only when `NOTIFY_DEV_OUTBOX` / `NOTIFY_SMS_SIMULATE`
-are enabled). The test page is served from the directory given by
-`NOTIFY_WEB_DIR` (it must contain `index.html`); production usually leaves it
-empty to turn the page off.
+PostgreSQL is the service's only persistent state: it must be reachable at
+`NOTIFY_DATABASE_URL`, and the database user needs table-create rights on the
+first start (the service only runs `CREATE TABLE IF NOT EXISTS`). The test page
+is served from the directory given by `NOTIFY_WEB_DIR` (it must contain
+`index.html`); production usually leaves it empty to turn the page off.
 
 ## svchost deployment
 
@@ -140,9 +136,8 @@ services:
       # sha256: "0000000000000000000000000000000000000000000000000000000000000000" # 64 hex chars; optional single-arch pin, otherwise svchost uses the GitHub asset digest
     env:
       NOTIFY_ADDR: "0.0.0.0:8090" # use "${HOST}:${PORT}" when the Host should assign the port
-      NOTIFY_DATA_DIR: /var/lib/nsc-msghub # must be persistent and writable; never point it at artifacts/ or tmp/
+      NOTIFY_DATABASE_URL: "${HOST:MSGHUB_DATABASE_URL}" # required PostgreSQL DSN; the DB must be reachable and the user needs table-create rights at first start
       NOTIFY_ROUTES: "alert=email,sms;digest=email;default=email"
-      NOTIFY_USERS_FILE: /var/lib/nsc-msghub/users.json
       NOTIFY_SMTP_HOST: smtp.qq.com
       NOTIFY_SMTP_PORT: "465"
       NOTIFY_SMTP_TLS: implicit
@@ -168,12 +163,17 @@ Notes:
   `${HOST}` / `${PORT}` take the dynamic values of the current launch. svchost
   only rewrites `env` values and `args` strings — do not write other expressions
   assuming shell semantics.
-- `NOTIFY_DATA_DIR` (and `NOTIFY_WEB_DIR`) must be absolute paths: the svchost
-  process CWD is the service root (`<data>/svchost/global` under the `global`
-  scope), upgrades only replace the bundle under `artifacts/` and `tmp/`, and the
-  data directory is self-managed and must stay writable.
+- `NOTIFY_WEB_DIR` must be an absolute path: the svchost process CWD is the
+  service root (`<data>/svchost/global` under the `global` scope) and upgrades
+  only replace the bundle under `artifacts/` and `tmp/`. No other path setting
+  is required — all persistent state lives in PostgreSQL.
+- `NOTIFY_DATABASE_URL` must point at a reachable PostgreSQL server; inject the
+  DSN from the Host environment (`MSGHUB_DATABASE_URL` in the snippet). The
+  service refuses to start when it is empty.
 - `health` uses `http /healthz`; that endpoint requires no token. The default
-  `type: process` cannot detect "process alive, listener not up".
+  `type: process` cannot detect "process alive, listener not up". Because
+  `/healthz` also reports database reachability (503 `degraded`), a PostgreSQL
+  outage fails this health check.
 - The service name `msghub` is deduplicated in the `serviceScope: global`
   namespace; another config declaring the same name fails the whole config. For
   multiple instances on one machine use `serviceScope: document` and keep the
@@ -216,11 +216,10 @@ A ready-to-use copy is checked in at the repository root:
   otherwise the release is rejected outright (see the ref rules in the publishing
   guide).
 - systemd: stop the service, replace `/usr/local/bin/msghub`, start it again; the
-  environment file and data directory stay untouched.
-- Data compatibility: `notifications.jsonl` is append-only JSONL; startup loads
-  the most recent 5000 records into memory for queries, and upgrades/rollbacks
-  neither migrate nor clear it. `users.json` reloads automatically after changes.
-  `outbox/` is only the dump directory for simulated deliveries.
+  environment file stays untouched and the PostgreSQL state is untouched.
+- Data compatibility: the service only runs `CREATE TABLE IF NOT EXISTS` at
+  startup; upgrades and rollbacks neither drop nor rewrite existing tables.
+  There is no data directory anymore — PostgreSQL backups are `pg_dump`'s job.
 - After a rollback, check that `version` on `/healthz` matches the target and
   confirm no old process is still around (a busy port makes startup fail
   immediately).
@@ -243,11 +242,14 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/channels/email/verify \
 ```
 
 In the `/api/v1/channels` response, `channels` reports each channel's mode and
-readiness, `directory` says whether the user directory comes from the local table
-or the user service, and `routes` is the effective type → channel order. Check
-here first after deploying, then send real notifications.
+readiness, `directory` says whether the user directory comes from the PostgreSQL
+`users` table or the user service, and `routes` is the effective type → channel
+order. `/healthz` answers `503` with `{"status":"degraded",...}` when the
+database cannot be queried. Check here first after deploying, then send real
+notifications.
 
 Without SMTP configured and without `NOTIFY_DEV_OUTBOX` / `NOTIFY_SMS_SIMULATE`,
 channels explicitly report "not available" and never pretend to send
-successfully. The simulation switches only write to `outbox/`; their records get
-status `simulated`, which stays distinguishable from a real `sent`.
+successfully. The simulation switches only write rows into `outbox_messages`;
+their records get status `simulated`, which stays distinguishable from a real
+`sent`.

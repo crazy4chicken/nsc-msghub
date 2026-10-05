@@ -16,10 +16,10 @@ delivering, and recording the outcome.
 1. **Intent** — the caller sends one `POST /api/v1/notify` with a `user`, a
    `type`, and a `body` (`text` or `markdown`). Callers never touch SMTP, phone
    numbers, or any other channel detail.
-2. **Directory resolution** — the recipient is resolved by user id: a local JSON
-   table or a user-service HTTP contract (`{id}` path placeholder, optional
-   bearer token, explicit 404/502 semantics). With no directory configured the
-   call answers an explicit 503.
+2. **Directory resolution** — the recipient is resolved by user id: the
+   PostgreSQL `users` table or a user-service HTTP contract (`{id}` path
+   placeholder, optional bearer token, explicit 404/502 semantics). With no
+   directory configured the call answers an explicit 503.
 3. **Ordered routing** — each notification type maps to an ordered channel
    priority (`alert=email,sms;digest=email;default=email`). An explicit `channel`
    in the request bypasses routing; when nothing is routable the call fails with
@@ -29,22 +29,28 @@ delivering, and recording the outcome.
    and reports "not available" until one is wired up. Markdown gets an
    inline-styled HTML shell plus a `text/plain` fallback for email, and
    syntax-stripped text for SMS.
-5. **Record** — every attempt is appended to a JSONL delivery record and kept in
-   memory for queries, enough to answer what was sent, to whom, and why it
-   failed.
+5. **Record** — every attempt is written to the PostgreSQL `notifications` table
+   and can be queried through the API, enough to answer what was sent, to whom,
+   and why it failed. `NOTIFY_RECORD_LIMIT` can cap the table at the newest N
+   records (`0` keeps everything).
 
 ## Requirements
 
 - Go 1.26 or newer (see `go.mod`)
-- No database; the only persistent state is the data directory
+- PostgreSQL 12 or newer, reachable through `NOTIFY_DATABASE_URL` (required)
 
 ## Quick start
 
+Provision a database and set the DSN, then run:
+
 ```sh
-cp .env.example .env      # then fill in NOTIFY_SMTP_HOST / _USER / _PASS (mailbox auth code)
+cp .env.example .env      # NOTIFY_DATABASE_URL (required), then NOTIFY_SMTP_HOST / _USER / _PASS (mailbox auth code)
 go build -o msghub .
 ./msghub
 ```
+
+The schema (`notifications`, `users`, `outbox_messages`) is created idempotently
+at startup; the database user needs table-create rights on the first start.
 
 Check the process and the resolved configuration:
 
@@ -68,21 +74,33 @@ curl -fsS -X POST http://127.0.0.1:8090/api/v1/notify \
   }'
 ```
 
-The user id must exist in the configured user directory (a local
-`data/users.json` is enough for a first try). The response is the delivery
-result: status, the channel that was chosen, the resolved recipients, and timing.
+The user id must exist in the configured user directory; with the default
+PostgreSQL table, seed it with SQL:
+
+```sql
+INSERT INTO users (id, name, channels) VALUES
+  ('u1001', 'Zhang San', '{"email": "zhangsan@example.com"}')
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, channels = EXCLUDED.channels;
+```
+
+The response is the delivery result: status, the channel that was chosen, the
+resolved recipients, and timing.
 
 ## Development simulation switches
 
 Two simulation paths are **off by default**, because "looks sent, never left the
 machine" is more dangerous than an outright failure:
 
-- `NOTIFY_DEV_OUTBOX=1` writes emails to `data/outbox/*.eml` instead of
+- `NOTIFY_DEV_OUTBOX=1` writes emails into the `outbox_messages` table instead of
   delivering them.
-- `NOTIFY_SMS_SIMULATE=1` writes SMS messages to `data/outbox/sms.log`.
+- `NOTIFY_SMS_SIMULATE=1` writes SMS messages into the same table.
 
 Neither switch changes the API. Their records get status `simulated`, which
-stays distinguishable from a real `sent`.
+stays distinguishable from a real `sent`. Inspect the simulated messages with:
+
+```sql
+SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY seq DESC LIMIT 20;
+```
 
 ## Next steps
 

@@ -24,6 +24,7 @@ var (
 	docUpstreamFailed  = docError(502, "upstream_failed", "Bad Gateway")
 	docChannelNotReady = docError(503, "channel_not_ready", "Service Unavailable")
 	docInternal        = docError(500, "internal_error", "Internal Server Error")
+	docStorageError    = docError(500, "storage_error", "Storage Error")
 )
 
 // docRecordExample 是一条成功的发送记录，发送与记录接口共用。
@@ -101,7 +102,7 @@ var DocOperations = []apidocs.Operation{
 		Path:        "/healthz",
 		Tag:         "Health",
 		Summary:     "Check liveness",
-		Description: "Use as an inexpensive unauthenticated liveness probe. Load balancers and orchestrators call it without credentials; it reports the process version, uptime, and the number of retained send records.",
+		Description: "Use as an inexpensive unauthenticated liveness probe. Load balancers and orchestrators call it without credentials; it reports the process version, uptime, and the number of rows in the notifications table. When the PostgreSQL store cannot be queried the probe returns 503 with status degraded (and no records field), so orchestrators can take the instance out of rotation.",
 		Response:    docHealthResponse{},
 		ResponseExample: map[string]any{
 			"status":        "ok",
@@ -116,7 +117,7 @@ var DocOperations = []apidocs.Operation{
 		Path:        "/api/v1/channels",
 		Tag:         "Channels",
 		Summary:     "List channels and routing",
-		Description: "Use to inspect the configured delivery channels, the user directory, and the type-to-channel routing table before sending. Each channel reports its provider, mode (live, dev, or unconfigured), and readiness; sends that need an unready channel fail with 503 channel_not_ready.",
+		Description: "Use to inspect the configured delivery channels, the user directory, and the type-to-channel routing table before sending. Each channel reports its provider, mode (live, dev, or unconfigured), and readiness; sends that need an unready channel fail with 503 channel_not_ready. In dev mode nothing is delivered: simulated email and SMS are written to the outbox_messages table (NOTIFY_DEV_OUTBOX / NOTIFY_SMS_SIMULATE).",
 		Security:    "bearer",
 		Response:    docChannelsResponse{},
 		ResponseExample: map[string]any{
@@ -160,25 +161,25 @@ var DocOperations = []apidocs.Operation{
 		Path:        "/api/v1/notifications",
 		Tag:         "Notifications",
 		Summary:     "List notification records",
-		Description: "Use to review retained send attempts, newest first. limit sets the page size (default 100; at most the 5000-record retention cap). channel, type, status, and userId narrow the result set; total is the number of retained records, not the number of matches.",
+		Description: "Use to review send attempts, newest first (ties broken by insertion order). limit sets the page size (default 100; values above 5000 are clamped to 5000). channel, type, status, and userId narrow the result set; total is the total number of rows in the notifications table, not the number of matches. NOTIFY_RECORD_LIMIT optionally caps retention: 0 keeps every record, N keeps only the newest N. A storage failure returns 500 storage_error.",
 		Security:    "bearer",
 		Response:    docListResponse{},
 		ResponseExample: map[string]any{
 			"records": []any{docRecordExample},
 			"total":   42,
 		},
-		Errors: []apidocs.ErrorDoc{docUnauthorized, docForbidden, docInternal},
+		Errors: []apidocs.ErrorDoc{docUnauthorized, docForbidden, docStorageError, docInternal},
 	},
 	{
 		Method:          "GET",
 		Path:            "/api/v1/notifications/{id}",
 		Tag:             "Notifications",
 		Summary:         "Get a notification record",
-		Description:     "Use to fetch one retained send record by its id, including the failure detail when delivery failed. Unknown IDs return 404 not_found.",
+		Description:     "Use to fetch one send record by its id, including the failure detail when delivery failed. Unknown IDs return 404 not_found; a storage failure returns 500 storage_error.",
 		Security:        "bearer",
 		Response:        notify.Record{},
 		ResponseExample: docRecordExample,
-		Errors:          []apidocs.ErrorDoc{docUnauthorized, docForbidden, docNotFound, docInternal},
+		Errors:          []apidocs.ErrorDoc{docUnauthorized, docForbidden, docNotFound, docStorageError, docInternal},
 	},
 	{
 		Method:      "POST",

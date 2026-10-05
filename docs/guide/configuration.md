@@ -6,8 +6,9 @@ outline: 2
 # Configuration
 
 Configuration comes entirely from environment variables, plus a `.env` file
-when present (real environment variables win). There is no configuration API and
-no database. Precedence is **CLI flag > environment variable > `.env` > built-in
+when present (real environment variables win). There is no configuration API;
+all persistent state lives in PostgreSQL, whose schema is created idempotently
+at startup. Precedence is **CLI flag > environment variable > `.env` > built-in
 default**; flags are parsed after `.env` is loaded, so `.env` values also act as
 flag defaults.
 
@@ -23,7 +24,8 @@ The template at the repository root lists every switch with inline comments:
 | `NOTIFY_BRAND` | `notify-service` | Email shell header and fallback sender display name. |
 | `NOTIFY_MAIL_FOOTER` | auto-generated | Email shell footer text. |
 | `NOTIFY_ADDR` | `127.0.0.1:8090` | Listen address; `0.0.0.0:8090` exposes it to other hosts. |
-| `NOTIFY_DATA_DIR` | `data` | Delivery records, default user table, outbox. |
+| `NOTIFY_DATABASE_URL` | required | PostgreSQL DSN (e.g. `postgres://user:pass@host:5432/db?sslmode=disable`). Empty makes the service refuse to start; the schema is created at first startup with `CREATE TABLE IF NOT EXISTS` only. |
+| `NOTIFY_RECORD_LIMIT` | `0` | Delivery records to keep: `0` keeps everything; when `>0` only the newest N records survive, pruned after each insert. |
 | `NOTIFY_TOKEN` | empty | Static token; when set, `/api/*` requires `Authorization: Bearer <token>` (an `X-Notify-Token` header is also accepted). Only effective while `NOTIFY_TEAMUSERS_URL` is unset. |
 | `NOTIFY_LOG_LEVEL` | `info` | `debug` logs every HTTP request. |
 | `NOTIFY_WEB_DIR` | `web` | Test page directory (must contain `index.html`); empty disables the page. |
@@ -56,8 +58,7 @@ The template at the repository root lists every switch with inline comments:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `NOTIFY_USERS_FILE` | `<data>/users.json` | Local user table. |
-| `NOTIFY_USER_SERVICE_URL` | empty | User service address; takes priority over the local user table. |
+| `NOTIFY_USER_SERVICE_URL` | empty | User service address; takes priority over the PostgreSQL `users` table. |
 | `NOTIFY_USER_SERVICE_PATH` | `/api/users/{id}` | User lookup path; must contain `{id}`. |
 | `NOTIFY_USER_SERVICE_TOKEN` | empty | Bearer token for the user service. |
 | `NOTIFY_USER_SERVICE_TIMEOUT` | `5` | User service timeout (seconds). |
@@ -67,8 +68,8 @@ The template at the repository root lists every switch with inline comments:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `NOTIFY_ROUTES` | `default=email` | Type-to-channel priority. |
-| `NOTIFY_SMS_SIMULATE` | `0` | `1` uses the local simulated SMS upstream. |
-| `NOTIFY_DEV_OUTBOX` | `0` | `1` writes emails into the outbox instead of delivering them. |
+| `NOTIFY_SMS_SIMULATE` | `0` | `1` uses the local simulated SMS upstream (rows land in the `outbox_messages` table). |
+| `NOTIFY_DEV_OUTBOX` | `0` | `1` writes emails into the `outbox_messages` table instead of delivering them. |
 
 ## CLI flags
 
@@ -78,7 +79,8 @@ Flags override the corresponding environment variables:
 | --- | --- | --- |
 | `-brand` | `NOTIFY_BRAND` | Service/email brand name. |
 | `-addr` | `NOTIFY_ADDR` | HTTP listen address. |
-| `-data` | `NOTIFY_DATA_DIR` | Data directory. |
+| `-database-url` | `NOTIFY_DATABASE_URL` | PostgreSQL DSN; required. |
+| `-record-limit` | `NOTIFY_RECORD_LIMIT` | Delivery records to keep (`0` = all). |
 | `-web` | `NOTIFY_WEB_DIR` | Test page directory. |
 | `-token` | `NOTIFY_TOKEN` | API token; empty means no authentication. |
 | `-log-level` | `NOTIFY_LOG_LEVEL` | `debug` / `info` / `warn` / `error`. |
@@ -108,15 +110,13 @@ to query user permissions — the service refuses to start without it.
 Two interchangeable implementations; when both are configured the user service
 wins.
 
-The local user table (reloaded automatically when the file changes) is a JSON
-object or a bare array:
+The local user table lives in the PostgreSQL `users` table (`id`, `name`,
+`channels` JSONB) and is maintained with SQL:
 
-```json
-{
-  "users": [
-    {"id": "u1001", "name": "Zhang San", "channels": {"email": "zhangsan@example.com", "sms": "13800000000"}}
-  ]
-}
+```sql
+INSERT INTO users (id, name, channels) VALUES
+  ('u1001', 'Zhang San', '{"email": "zhangsan@example.com", "sms": "13800000000"}')
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, channels = EXCLUDED.channels;
 ```
 
 The user service must answer `GET {URL}{PATH}` with `200` and a user object:
@@ -148,14 +148,24 @@ another one.
 
 ## Storage and records
 
-Every attempt is appended to `<data>/notifications.jsonl`; startup loads the
-most recent 5000 records into memory for queries. Records carry `status`
-`sent` (real delivery), `simulated` (written locally, not delivered), or
-`failed`, together with `userId`, `userName`, the channel that was finally
-chosen, and — on failure — the error reason. The record list can be filtered by
-channel, type, status, and user id via the query parameters of
-`GET /api/v1/notifications`.
+PostgreSQL is the only persistent state. At startup the service creates three
+tables idempotently (plain `CREATE TABLE IF NOT EXISTS`): `notifications`
+(delivery records), `users` (the local user table), and `outbox_messages`
+(simulated emails and SMS messages). The database must be reachable, and its
+user needs table-create rights on the first start; there is no migration
+tooling beyond that auto-DDL.
 
-The data directory also holds the default `users.json` and the `outbox/`
-directory, which is written only when `NOTIFY_DEV_OUTBOX` / `NOTIFY_SMS_SIMULATE`
-are enabled.
+Every attempt is inserted into `notifications`; with `NOTIFY_RECORD_LIMIT` set
+to `>0`, each insert also prunes all but the newest N records (`0`, the default,
+keeps everything). Records carry `status` `sent` (real delivery), `simulated`
+(row in `outbox_messages`, not delivered), or `failed`, together with `userId`,
+`userName`, the channel that was finally chosen, and — on failure — the error
+reason. The record list can be filtered by channel, type, status, and user id
+via the query parameters of `GET /api/v1/notifications`.
+
+`outbox_messages` is written only when `NOTIFY_DEV_OUTBOX` / `NOTIFY_SMS_SIMULATE`
+are enabled; inspect simulated deliveries with:
+
+```sql
+SELECT "time", channel, recipients, subject, body FROM outbox_messages ORDER BY seq DESC LIMIT 20;
+```

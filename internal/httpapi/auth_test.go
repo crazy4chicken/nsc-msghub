@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -9,13 +10,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"notify-service/internal/directory"
 	"notify-service/internal/notify"
 	"notify-service/internal/store"
 )
@@ -112,30 +110,91 @@ func (s *teamusersStub) sign(t *testing.T, subject string) string {
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
-// newTestServer 构造一个可直接打请求的 Handler：真实 store/用户目录/服务，日志丢弃。
-func newTestServer(t *testing.T, opt Options) http.Handler {
+// memRecords 是 httpapi.Records 接口的内存假实现，查询语义对齐 store：
+// 记录按写入顺序保存，List 返回时间倒序（Limit<=0 默认 100，>5000 截到 5000）。
+type memRecords struct {
+	records []notify.Record
+}
+
+func (m *memRecords) Get(_ context.Context, id string) (notify.Record, bool, error) {
+	for i := len(m.records) - 1; i >= 0; i-- {
+		if m.records[i].ID == id {
+			return m.records[i], true, nil
+		}
+	}
+	return notify.Record{}, false, nil
+}
+
+func (m *memRecords) List(_ context.Context, f store.Filter) ([]notify.Record, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 5000 {
+		limit = 5000
+	}
+	out := make([]notify.Record, 0, limit)
+	for i := len(m.records) - 1; i >= 0 && len(out) < limit; i-- {
+		rec := m.records[i]
+		if f.Channel != "" && string(rec.Channel) != f.Channel {
+			continue
+		}
+		if f.Type != "" && rec.Type != f.Type {
+			continue
+		}
+		if f.UserID != "" && rec.UserID != f.UserID {
+			continue
+		}
+		if f.Status != "" && rec.Status != f.Status {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+func (m *memRecords) Count(_ context.Context) (int, error) {
+	return len(m.records), nil
+}
+
+// fakeResolver 是 notify.Resolver 的内存假实现：按 users map 解析用户。
+type fakeResolver struct {
+	users map[string]notify.User
+}
+
+func (r *fakeResolver) Describe() string {
+	return "测试用户表（内存）"
+}
+
+func (r *fakeResolver) Resolve(_ context.Context, userID string) (notify.User, error) {
+	user, ok := r.users[userID]
+	if !ok {
+		return notify.User{}, notify.NotFoundf("用户 %q 不存在", userID)
+	}
+	return user, nil
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// testService 构造一个不落记录的最小 Service，供 HTTP 处理器用例使用。
+func testService(t *testing.T, resolver notify.Resolver) *notify.Service {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	records, _, err := store.Open(filepath.Join(t.TempDir(), "notifications.jsonl"), 100)
-	if err != nil {
-		t.Fatalf("打开记录库失败: %v", err)
-	}
-	usersFile := filepath.Join(t.TempDir(), "users.json")
-	users := []byte(`{"users":[{"id":"granted","name":"已授权","channels":{"email":"granted@example.com"}}]}`)
-	if err := os.WriteFile(usersFile, users, 0o600); err != nil {
-		t.Fatalf("写入测试用户表失败: %v", err)
-	}
-	resolver, err := directory.New("", directory.DefaultUserServicePath, "", 5*time.Second, usersFile)
-	if err != nil {
-		t.Fatalf("构造用户目录失败: %v", err)
-	}
 	routes, err := notify.ParseRoutes("default=email")
 	if err != nil {
 		t.Fatalf("解析路由失败: %v", err)
 	}
-	opt.Service = notify.NewService(records, resolver, routes, logger)
-	opt.Store = records
-	opt.Logger = logger
+	return notify.NewService(nil, resolver, routes, discardLogger())
+}
+
+// newTestServer 构造一个可直接打请求的 Handler：记录库与用户目录用内存假实现，日志丢弃。
+func newTestServer(t *testing.T, opt Options) http.Handler {
+	t.Helper()
+	opt.Service = testService(t, &fakeResolver{users: map[string]notify.User{
+		"granted": {ID: "granted", Name: "已授权", Channels: map[string]string{"email": "granted@example.com"}},
+	}})
+	opt.Store = &memRecords{}
+	opt.Logger = discardLogger()
 	return NewServer(opt).Handler()
 }
 

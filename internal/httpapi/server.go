@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -20,10 +21,18 @@ import (
 	"notify-service/internal/store"
 )
 
+// Records 是记录查询所需的最小存储能力，由 internal/store 实现；
+// 允许为 nil（如文档生成工具只遍历路由表，不会调用处理器）。
+type Records interface {
+	Get(ctx context.Context, id string) (notify.Record, bool, error)
+	List(ctx context.Context, f store.Filter) ([]notify.Record, error)
+	Count(ctx context.Context) (int, error)
+}
+
 // Options 是构造 Server 所需的依赖。
 type Options struct {
 	Service *notify.Service
-	Store   *store.Store
+	Store   Records
 	Email   *channel.EmailNotifier
 	WebDir  string
 	Token   string
@@ -35,7 +44,7 @@ type Options struct {
 // Server 持有全部 HTTP 依赖。
 type Server struct {
 	svc     *notify.Service
-	store   *store.Store
+	store   Records
 	email   *channel.EmailNotifier
 	webDir  string
 	token   string
@@ -87,12 +96,24 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"status":        "ok",
 		"version":       s.version,
 		"uptimeSeconds": int(time.Since(s.started).Seconds()),
-		"records":       s.store.Count(),
-	})
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusOK, payload)
+		return
+	}
+	total, err := s.store.Count(r.Context())
+	if err != nil {
+		s.log.Error("健康检查读取发送记录数失败", "error", err.Error())
+		payload["status"] = "degraded"
+		writeJSON(w, http.StatusServiceUnavailable, payload)
+		return
+	}
+	payload["records"] = total
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
@@ -166,18 +187,39 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	limit, _ := strconv.Atoi(query.Get("limit"))
-	records := s.store.List(store.Filter{
-		Channel: query.Get("channel"),
-		Type:    query.Get("type"),
-		UserID:  query.Get("userId"),
-		Status:  query.Get("status"),
-		Limit:   limit,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"records": records, "total": s.store.Count()})
+	records := []notify.Record{}
+	total := 0
+	if s.store != nil {
+		var err error
+		records, err = s.store.List(r.Context(), store.Filter{
+			Channel: query.Get("channel"),
+			Type:    query.Get("type"),
+			UserID:  query.Get("userId"),
+			Status:  query.Get("status"),
+			Limit:   limit,
+		})
+		if err != nil {
+			writeError(w, &storageError{err: err})
+			return
+		}
+		if total, err = s.store.Count(r.Context()); err != nil {
+			writeError(w, &storageError{err: err})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": records, "total": total})
 }
 
 func (s *Server) handleGetNotification(w http.ResponseWriter, r *http.Request) {
-	rec, ok := s.store.Get(r.PathValue("id"))
+	if s.store == nil {
+		writeError(w, notify.NotFoundf("记录 %q 不存在", r.PathValue("id")))
+		return
+	}
+	rec, ok, err := s.store.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, &storageError{err: err})
+		return
+	}
 	if !ok {
 		writeError(w, notify.NotFoundf("记录 %q 不存在", r.PathValue("id")))
 		return
@@ -259,22 +301,39 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, map[string]any{"error": errorBody(err)})
 }
 
-func errorBody(err error) map[string]any {
-	kind := "internal_error"
+// storageError 把存储层错误统一映射为 500 storage_error；
+// 具体 SQL 失败原因只进日志与 message，不额外分类。
+type storageError struct {
+	err error
+}
+
+func (e *storageError) Error() string { return e.err.Error() }
+
+func (e *storageError) Unwrap() error { return e.err }
+
+// errorKind 返回响应里的错误代码：notify.Error 用自己的 Kind，存储层错误固定 storage_error。
+func errorKind(err error) string {
 	var nerr *notify.Error
 	if errors.As(err, &nerr) {
-		kind = string(nerr.Kind)
+		return string(nerr.Kind)
 	}
-	return map[string]any{"kind": kind, "message": err.Error()}
+	var serr *storageError
+	if errors.As(err, &serr) {
+		return "storage_error"
+	}
+	return "internal_error"
+}
+
+func errorBody(err error) map[string]any {
+	return map[string]any{"kind": errorKind(err), "message": err.Error()}
 }
 
 func httpStatus(err error) (int, string) {
-	kind := "internal_error"
+	kind := errorKind(err)
 	var nerr *notify.Error
 	if !errors.As(err, &nerr) {
 		return http.StatusInternalServerError, kind
 	}
-	kind = string(nerr.Kind)
 	switch nerr.Kind {
 	case notify.KindInvalid:
 		return http.StatusBadRequest, kind

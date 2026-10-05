@@ -157,8 +157,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// New 按配置选择解析器：优先用户服务，其次本地用户表，都没有时返回 nil。
-func New(baseURL, path, token string, timeout time.Duration, usersFile string) (notify.Resolver, error) {
+// New 按配置选择解析器：优先用户服务，其次 PostgreSQL 用户表，都没有时返回 nil。
+func New(baseURL, path, token string, timeout time.Duration, q Querier) (notify.Resolver, error) {
 	remote, err := NewHTTPResolver(baseURL, path, token, timeout)
 	if err != nil {
 		return nil, err
@@ -166,7 +166,7 @@ func New(baseURL, path, token string, timeout time.Duration, usersFile string) (
 	if remote != nil {
 		return remote, nil
 	}
-	if local := NewFileResolver(usersFile); local != nil {
+	if local := NewPGResolver(q); local != nil {
 		return local, nil
 	}
 	return nil, nil
