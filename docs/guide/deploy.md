@@ -17,22 +17,25 @@ and the [Microservice publishing guide](https://github.com/crazy4chicken/nekosti
 
 ## Release artifact contract
 
-CI builds and publishes static Linux binaries on `v*` tags (see
-`.github/workflows/release.yml`):
+CI builds and publishes static binaries for linux, windows and macos on `v*`
+tags (see `.github/workflows/release.yml`):
 
 - The build command is fixed to
-  `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TAG"`; the
-  artifact uses no cgo and has no dynamic library dependencies.
+  `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -trimpath -ldflags "-s -w -X main.version=$TAG"`;
+  the artifacts use no cgo and have no dynamic library dependencies.
 - The version is injected through `-X main.version` as the full tag (including
   the `v` prefix). It appears in the startup log and in the `version` field of
   `/healthz`; a build without ldflags keeps the source default (`0.3.0`).
-- The svchost release asset is named `msghub_<version>_<arch>.zip`: `<version>`
-  is the tag without its `v` prefix (`v0.3.0` → `msghub_0.3.0_x64.zip`) and
-  `<arch>` is `x64` or `arm64`.
-- The ZIP contains exactly one entry at its root, named exactly `msghub` (the
-  serviceId); the sha256 covers the ZIP file itself, not the unpacked binary.
+- The svchost release asset is named
+  `msghub_<version>_<platform>_<arch>.zip`: `<version>` is the tag without its
+  `v` prefix (`v0.3.0` → `msghub_0.3.0_linux_x64.zip`), `<platform>` is
+  `linux`, `windows` or `macos`, and `<arch>` is `x64` or `arm64`.
+- The release's `target_commitish` is pinned to the built commit's full SHA.
+- The ZIP contains exactly one entry at its root: `msghub` on linux/macos, or
+  `msghub.exe` on windows, matching the serviceId; the sha256 covers the ZIP
+  file itself, not the unpacked binary.
 
-Download the ZIP for your architecture from the
+Download the ZIP for your platform and architecture from the
 [Releases](https://github.com/crazy4chicken/nsc-msghub/releases) page; the
 release notes link to this page.
 

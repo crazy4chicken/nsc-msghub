@@ -20,10 +20,36 @@ jobs:
     strategy:
       matrix:
         include:
-          - goarch: amd64
+          - platform: linux
+            goos: linux
+            goarch: amd64
             arch: x64
-          - goarch: arm64
+            entry: msghub
+          - platform: linux
+            goos: linux
+            goarch: arm64
             arch: arm64
+            entry: msghub
+          - platform: windows
+            goos: windows
+            goarch: amd64
+            arch: x64
+            entry: msghub.exe
+          - platform: windows
+            goos: windows
+            goarch: arm64
+            arch: arm64
+            entry: msghub.exe
+          - platform: macos
+            goos: darwin
+            goarch: amd64
+            arch: x64
+            entry: msghub
+          - platform: macos
+            goos: darwin
+            goarch: arm64
+            arch: arm64
+            entry: msghub
     steps:
       - name: Resolve version
         run: |
@@ -41,23 +67,28 @@ jobs:
           go-version-file: go.mod
 
       # svchost release contract: the asset must be named
-      # msghub_<version>_<arch>.zip and the entry binary must sit at the
-      # ZIP root with the exact service name "msghub".
+      # msghub_<version>_<platform>_<arch>.zip; the entry binary must sit at
+      # the ZIP root, named "msghub" (POSIX) or "msghub.exe" (Windows).
       - name: Build
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          ENTRY: ${{ matrix.entry }}
         run: |
           CGO_ENABLED=0 go build -trimpath \
             -ldflags "-s -w -X main.version=$TAG" \
-            -o dist/msghub .
+            -o "dist/$ENTRY" .
 
       - name: Package
         env:
+          PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
+          ENTRY: ${{ matrix.entry }}
         run: |
           cd dist
-          zip "msghub_${TAG#v}_${ARCH}.zip" msghub
+          # 4-segment name ({serviceId}_{version}_{platform}_{arch}); the
+          # 3-segment form is legacy and only matches Linux hosts.
+          zip "msghub_${TAG#v}_${PLATFORM}_${ARCH}.zip" "$ENTRY"
 
       # archive: false uploads the ZIP as-is; the artifact name becomes the
       # file name, which the publish job matches by pattern.
@@ -80,8 +111,8 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       # skip-decompress: the uploads are raw .zip files (archive: false);
-      # without this the client would unzip them and both architectures
-      # would clobber the same bare "msghub" entry.
+      # without this the client would unzip every asset and the bare
+      # "msghub"/"msghub.exe" entries would clobber each other.
       - name: Download assets
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
@@ -94,19 +125,26 @@ jobs:
       # creates it at the dispatched ref. GH_REPO substitutes for the
       # missing git checkout in this job. --notes is prepended to the
       # generated notes and links the hosted deployment guide, the
-      # committed sample Compose file, and the per-arch asset downloads,
-      # as required by the svchost publishing docs.
+      # committed sample Compose file, and the per-platform asset
+      # downloads, as required by the svchost publishing docs.
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          DOWNLOADS=""
+          for target in linux_x64 linux_arm64 windows_x64 windows_arm64 macos_x64 macos_arm64; do
+            DOWNLOADS+="下载 ${target}: https://github.com/crazy4chicken/nsc-msghub/releases/download/$TAG/msghub_${TAG#v}_${target}.zip"$'\n'
+          done
           NOTES=$(printf '%s\n' \
             "部署与配置指南（svchost compose）: https://crazy4chicken.github.io/nsc-msghub/guide/deploy" \
             "示例 Compose 文件: https://github.com/crazy4chicken/nsc-msghub/blob/main/svchost.compose.yaml" \
-            "下载 x64: https://github.com/crazy4chicken/nsc-msghub/releases/download/$TAG/msghub_${TAG#v}_x64.zip" \
-            "下载 arm64: https://github.com/crazy4chicken/nsc-msghub/releases/download/$TAG/msghub_${TAG#v}_arm64.zip")
+            "$DOWNLOADS")
+          # --target pins target_commitish to the built commit's full SHA, as
+          # the publishing guide requires (the default is the branch name,
+          # which breaks commit-prefix ref resolution).
           gh release create "$TAG" --title "$TAG" --generate-notes \
+            --target "${{ github.sha }}" \
             --notes "$NOTES" \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" dist/*.zip --clobber
